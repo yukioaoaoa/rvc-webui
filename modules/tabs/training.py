@@ -8,6 +8,7 @@ import gradio as gr
 from lib.rvc.preprocessing import extract_f0, extract_feature, split
 from lib.rvc.train import (create_dataset_meta, glob_dataset, train_index,
                            train_model)
+from lib.rvc_v2.train import train_model as train_model_v3
 from modules import models, utils
 from modules.shared import MODELS_DIR, device, half_support
 from modules.ui import Tab
@@ -243,28 +244,52 @@ class Training(Tab):
                 augment_path = None
                 speaker_info_path = None
 
-            train_model(
-                gpu_ids,
-                config,
-                training_dir,
-                model_name,
-                out_dir,
-                sampling_rate_str,
-                f0,
-                batch_size,
-                augment,
-                augment_path,
-                speaker_info_path,
-                cache_batch,
-                num_epochs,
-                save_every_epoch,
-                pre_trained_bottom_model_g,
-                pre_trained_bottom_model_d,
-                embedder_name,
-                int(embedding_output_layer),
-                False,
-                None if len(gpu_ids) > 1 else device,
-            )
+            if version != "v3":
+                train_model(
+                    gpu_ids,
+                    config,
+                    training_dir,
+                    model_name,
+                    out_dir,
+                    sampling_rate_str,
+                    f0,
+                    batch_size,
+                    augment,
+                    augment_path,
+                    speaker_info_path,
+                    cache_batch,
+                    num_epochs,
+                    save_every_epoch,
+                    pre_trained_bottom_model_g,
+                    pre_trained_bottom_model_d,
+                    embedder_name,
+                    int(embedding_output_layer),
+                    False,
+                    None if len(gpu_ids) > 1 else device,
+                )
+            else:
+                train_model_v3(
+                    gpu_ids,
+                    config,
+                    training_dir,
+                    model_name,
+                    out_dir,
+                    sampling_rate_str,
+                    f0,
+                    batch_size,
+                    augment,
+                    augment_path,
+                    speaker_info_path,
+                    cache_batch,
+                    num_epochs,
+                    save_every_epoch,
+                    pre_trained_bottom_model_g,
+                    pre_trained_bottom_model_d,
+                    embedder_name,
+                    int(embedding_output_layer),
+                    False,
+                    None if len(gpu_ids) > 1 else device,
+                )
 
             yield "Training index..."
             if run_train_index:
@@ -306,7 +331,7 @@ class Training(Tab):
 
                     with gr.Row().style(equal_height=False):
                         version = gr.Radio(
-                            choices=["v1", "v2"],
+                            choices=["v1", "v2", "v3"],
                             value="v2",
                             label="Model version",
                         )

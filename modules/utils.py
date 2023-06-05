@@ -58,13 +58,15 @@ def download_file(url: str, out: str, position: int = 0, show: bool = True):
 
 
 def load_config(
-    version: Literal["v1", "v2"],
+    version: Literal["v1", "v2", "v3"],
     training_dir: str,
     sample_rate: str,
     emb_channels: int,
     fp16: bool,
 ):
-    if emb_channels == 256:
+    if version == "v3":
+        config_path = os.path.join(ROOT_DIR, "configs", f"48k-v3.json")
+    elif emb_channels == 256:
         config_path = os.path.join(ROOT_DIR, "configs", f"{sample_rate}.json")
     else:
         config_path = os.path.join(
