@@ -6,7 +6,7 @@ from torch.nn import functional as F
 from torch.nn.utils import remove_weight_norm, weight_norm
 
 from . import commons
-from .modules import LayerNorm
+from .modules import LayerNorm, LoRALinear1d
 
 
 class Encoder(nn.Module):
@@ -19,7 +19,7 @@ class Encoder(nn.Module):
         n_layers,
         kernel_size=1,
         p_dropout=0.0,
-        window_size=10,
+        window_size=25,
         **kwargs
     ):
         super().__init__()
@@ -81,33 +81,6 @@ class Encoder(nn.Module):
             l.remove_weight_norm()
 
 
-class LoRALinear(nn.Module):
-    def __init__(self, in_channels, out_channels, info_channels, r):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.info_channels = info_channels
-        self.r = r
-        self.main_fc = weight_norm(nn.Conv1d(in_channels, out_channels, 1))
-        self.adapter_in = nn.Conv1d(info_channels, in_channels * r, 1)
-        self.adapter_out = nn.Conv1d(info_channels, out_channels * r, 1)
-        nn.init.normal_(self.adapter_in.weight.data, 0, 0.01)
-        nn.init.constant_(self.adapter_out.weight.data, 1e-6)
-        self.adapter_in = weight_norm(self.adapter_in)
-        self.adapter_out = weight_norm(self.adapter_out)
-
-    def forward(self, x, g):
-        a_in = self.adapter_in(g).view(-1, self.in_channels, self.r)
-        a_out = self.adapter_out(g).view(-1, self.r, self.out_channels)
-        x = self.main_fc(x) + torch.einsum("brl,brc->bcl", torch.einsum("bcl,bcr->brl", x, a_in), a_out)
-        return x
-
-    def remove_weight_norm(self):
-        remove_weight_norm(self.main_fc)
-        remove_weight_norm(self.adapter_in)
-        remove_weight_norm(self.adapter_out)
-
-
 class MultiHeadAttention(nn.Module):
     def __init__(
         self,
@@ -117,7 +90,7 @@ class MultiHeadAttention(nn.Module):
         n_heads,
         p_dropout=0.0,
         window_size=None,
-        heads_share=True,
+        heads_share=False,
         block_length=None,
         proximal_bias=False,
         proximal_init=False,
@@ -137,12 +110,12 @@ class MultiHeadAttention(nn.Module):
         self.attn = None
 
         self.k_channels = channels // n_heads
-        self.conv_q = LoRALinear(channels, channels, gin_channels, 2)
-        self.conv_k = LoRALinear(channels, channels, gin_channels, 2)
-        self.conv_v = LoRALinear(channels, channels, gin_channels, 2)
+        self.conv_q = LoRALinear1d(channels, channels, gin_channels, 2)
+        self.conv_k = LoRALinear1d(channels, channels, gin_channels, 2)
+        self.conv_v = LoRALinear1d(channels, channels, gin_channels, 2)
         self.conv_qkw = weight_norm(nn.Conv1d(channels, channels, 5, 1, groups=channels, padding=2))
         self.conv_vw = weight_norm(nn.Conv1d(channels, channels, 5, 1, groups=channels, padding=2))
-        self.conv_o = LoRALinear(channels, out_channels, gin_channels, 2)
+        self.conv_o = LoRALinear1d(channels, out_channels, gin_channels, 2)
         self.drop = nn.Dropout(p_dropout)
 
         if window_size is not None:
@@ -332,18 +305,18 @@ class FFN(nn.Module):
         self.activation = activation
         self.causal = causal
 
-        self.conv_1 = LoRALinear(in_channels, filter_channels, gin_channels, 2)
-        self.conv_2 = LoRALinear(filter_channels, out_channels, gin_channels, 2)
+        self.conv_1 = LoRALinear1d(in_channels, filter_channels, gin_channels, 2)
+        self.conv_2 = LoRALinear1d(filter_channels, out_channels, gin_channels, 2)
         self.drop = nn.Dropout(p_dropout)
 
     def forward(self, x, x_mask, g):
-        x = self.conv_1(x, g)
+        x = self.conv_1(x * x_mask, g)
         if self.activation == "gelu":
             x = x * torch.sigmoid(1.702 * x)
         else:
             x = torch.relu(x)
         x = self.drop(x)
-        x = self.conv_2(x, g)
+        x = self.conv_2(x * x_mask, g)
         return x * x_mask
 
     def _causal_padding(self, x):

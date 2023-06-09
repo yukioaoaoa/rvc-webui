@@ -217,115 +217,137 @@ class WN(torch.nn.Module):
             torch.nn.utils.remove_weight_norm(l)
 
 
+class LoRALinear1d(nn.Module):
+    def __init__(self, in_channels, out_channels, info_channels, r):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.info_channels = info_channels
+        self.r = r
+        self.main_fc = weight_norm(nn.Conv1d(in_channels, out_channels, 1))
+        self.adapter_in = nn.Conv1d(info_channels, in_channels * r, 1)
+        self.adapter_out = nn.Conv1d(info_channels, out_channels * r, 1)
+        nn.init.normal_(self.adapter_in.weight.data, 0, 0.01)
+        nn.init.constant_(self.adapter_out.weight.data, 1e-6)
+        init_weights(self.main_fc)
+        self.adapter_in = weight_norm(self.adapter_in)
+        self.adapter_out = weight_norm(self.adapter_out)
+
+    def forward(self, x, g):
+        a_in = self.adapter_in(g).view(-1, self.in_channels, self.r)
+        a_out = self.adapter_out(g).view(-1, self.r, self.out_channels)
+        x = self.main_fc(x) + torch.einsum("brl,brc->bcl", torch.einsum("bcl,bcr->brl", x, a_in), a_out)
+        return x
+
+    def remove_weight_norm(self):
+        remove_weight_norm(self.main_fc)
+        remove_weight_norm(self.adapter_in)
+        remove_weight_norm(self.adapter_out)
+
+
+class LoRALinear2d(nn.Module):
+    def __init__(self, in_channels, out_channels, info_channels, r):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.info_channels = info_channels
+        self.r = r
+        self.main_fc = weight_norm(nn.Conv2d(in_channels, out_channels, (1, 1), (1, 1)))
+        self.adapter_in = nn.Conv1d(info_channels, in_channels * r, 1)
+        self.adapter_out = nn.Conv1d(info_channels, out_channels * r, 1)
+        nn.init.normal_(self.adapter_in.weight.data, 0, 0.01)
+        nn.init.constant_(self.adapter_out.weight.data, 1e-6)
+        self.adapter_in = weight_norm(self.adapter_in)
+        self.adapter_out = weight_norm(self.adapter_out)
+
+    def forward(self, x, g):
+        a_in = self.adapter_in(g).view(-1, self.in_channels, self.r)
+        a_out = self.adapter_out(g).view(-1, self.r, self.out_channels)
+        x = self.main_fc(x) + torch.einsum("brhw,brc->bchw", torch.einsum("bchw,bcr->brhw", x, a_in), a_out)
+        return x
+
+    def remove_weight_norm(self):
+        remove_weight_norm(self.main_fc)
+        remove_weight_norm(self.adapter_in)
+        remove_weight_norm(self.adapter_out)
+
+
 class WaveConv1D(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_sizes, extend_ratio, use_spectral_norm=False):
+    def __init__(self, in_channels, out_channels, gin_channels, kernel_sizes, strides, dilations, extend_ratio, r, use_spectral_norm=False):
         super(WaveConv1D, self).__init__()
         norm_f = weight_norm if use_spectral_norm == False else spectral_norm
         inner_channels = int(in_channels * extend_ratio)
         self.convs = []
         # self.norms = []
-        dilation = 1
-        for i, k in enumerate(kernel_sizes):
-            self.convs.append(norm_f(Conv1d(in_channels, inner_channels, 1, 1)))
-            # self.norms.append(torch.nn.InstanceNorm1d(inner_channels))
-            self.convs.append(norm_f(Conv1d(inner_channels, inner_channels, k, k//2, dilation=dilation, groups=inner_channels, padding=get_padding(k, dilation))))
-            # self.norms.append(torch.nn.InstanceNorm1d(inner_channels))
-            if i < len(kernel_sizes) - 1:
-                self.convs.append(norm_f(Conv1d(inner_channels, in_channels, 1, 1)))
-                # self.norms.append(torch.nn.InstanceNorm1d(in_channels))
+        self.convs.append(LoRALinear1d(in_channels, inner_channels, gin_channels, r))
+        for i, (k, s, d) in enumerate(zip(kernel_sizes, strides, dilations), start=1):
+            self.convs.append(norm_f(Conv1d(inner_channels, inner_channels, k, s, dilation=d, groups=inner_channels, padding=get_padding(k, d))))
+            if i < len(kernel_sizes):
+                self.convs.append(norm_f(Conv1d(inner_channels, inner_channels, 1, 1)))
             else:
                 self.convs.append(norm_f(Conv1d(inner_channels, out_channels, 1, 1)))
-                # self.norms.append(torch.nn.InstanceNorm1d(out_channels))
-            dilation = -(-k // 2)
         self.convs = nn.ModuleList(self.convs)
-        # self.norms = nn.ModuleList(self.norms)
 
-    def forward(self, x):
-        # for l, n in zip(self.convs, self.norms):
-        for l in self.convs:
-            x = l(x)
-            # x = n(x)
-            x = F.leaky_relu(x, modules.LRELU_SLOPE)
-        return x
-
-
-class WaveConv1D2(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_sizes, extend_ratio, use_spectral_norm=False):
-        super(WaveConv1D, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
-        inner_channels = int(in_channels * extend_ratio)
-        self.convs = []
-        # self.norms = []
-        dilation = 1
-        for i, k in enumerate(kernel_sizes):
-            if i < len(kernel_sizes) - 1:
-                self.convs.append(norm_f(Conv1d(in_channels, in_channels, k, k//2, dilation=dilation, padding=get_padding(k, dilation))))
+    def forward(self, x, g, x_mask=None):
+        for i, l in enumerate(self.convs):
+            if i % 2:
+                x_ = l(x)
             else:
-                self.convs.append(norm_f(Conv1d(in_channels, out_channels, k, k//2, dilation=dilation, padding=get_padding(k, dilation))))
-            dilation = -(-k // 2)
-        self.convs = nn.ModuleList(self.convs)
-        # self.norms = nn.ModuleList(self.norms)
-
-    def forward(self, x):
-        # for l, n in zip(self.convs, self.norms):
-        for l in self.convs:
-            x = l(x)
-            # x = n(x)
-            x = F.leaky_relu(x, modules.LRELU_SLOPE)
+                x_ = l(x, g)
+            x = F.leaky_relu(x_, modules.LRELU_SLOPE)
+            if x_mask is not None:
+                x *= x_mask
         return x
+
+    def remove_weight_norm(self):
+        for i, c in enumerate(self.convs):
+            if i % 2:
+                remove_weight_norm(c)
+            else:
+                c.remove_weight_norm()
+
 
 class FusedMBConv2D(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, extend_ratio, use_spectral_norm=False):
+    def __init__(self, in_channels, out_channels, gin_channels, kernel_size, stride, extend_ratio, r=1, use_spectral_norm=False):
         super(FusedMBConv2D, self).__init__()
         norm_f = weight_norm if use_spectral_norm == False else spectral_norm
         inner_channels = int(in_channels * extend_ratio)
         self.layers = nn.ModuleList(
             [
                 norm_f(Conv2d(in_channels, inner_channels, kernel_size, stride, padding=(get_padding(kernel_size[0], 1), 0))),
-                norm_f(Conv2d(inner_channels, out_channels, [1, 1], [1, 1])),
+                LoRALinear2d(inner_channels, out_channels, gin_channels, r=r),
             ]
         )
-        #self.norms = nn.ModuleList(
-        #    [
-        #        torch.nn.InstanceNorm2d(inner_channels),
-        #        torch.nn.InstanceNorm2d(out_channels),
-        #    ]
-        #)
 
-    def forward(self, x):
-        # for l, n in zip(self.convs, self.norms):
-        for l in self.layers:
-            x = l(x)
-            # x = n(x)
+    def forward(self, x, g):
+        for i, l in enumerate(self.layers):
+            if i:
+                x = l(x, g)
+            else:
+                x = l(x)
             x = F.leaky_relu(x, modules.LRELU_SLOPE)
         return x
 
 
 class MBConv2D(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, extend_ratio, use_spectral_norm=False):
+    def __init__(self, in_channels, out_channels, gin_channels, kernel_size, stride, extend_ratio, r, use_spectral_norm=False):
         super(MBConv2D, self).__init__()
         norm_f = weight_norm if use_spectral_norm == False else spectral_norm
         inner_channels = int(in_channels * extend_ratio)
         self.layers = nn.ModuleList(
             [
-                norm_f(Conv2d(in_channels, inner_channels, [1, 1], [1, 1])),
+                LoRALinear2d(in_channels, inner_channels, gin_channels, r=r),
                 norm_f(Conv2d(inner_channels, inner_channels, kernel_size, stride, groups=inner_channels, padding=(get_padding(kernel_size[0], 1), 0))),
-                norm_f(Conv2d(inner_channels, out_channels, [1, 1], [1, 1])),
+                LoRALinear2d(inner_channels, out_channels, gin_channels, r=r),
             ]
         )
-        #self.norms = nn.ModuleList(
-        #    [
-        #        torch.nn.InstanceNorm2d(inner_channels),
-        ##        torch.nn.InstanceNorm2d(inner_channels),
-        #        torch.nn.InstanceNorm2d(out_channels),
-        #    ]
-        #)
 
-    def forward(self, x):
-        # for l, n in zip(self.convs, self.norms):
-        for l in self.layers:
-            x = l(x)
-            # x = n(x)
+    def forward(self, x, g):
+        for i, l in enumerate(self.layers):
+            if i%2 == 0:
+                x = l(x, g)
+            else:
+                x = l(x)
             x = F.leaky_relu(x, modules.LRELU_SLOPE)
         return x
 
@@ -354,292 +376,52 @@ class SqueezeExcitation1D(torch.nn.Module):
         remove_weight_norm(self.fc2)
 
 
-class FusedMBConv1d(torch.nn.Module):
-    def __init__(self, channels, kernel_size, stride, dilation, extend_ratio, use_spectral_norm=False):
-        super(FusedMBConv1d, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
-        inner_channels = channels * extend_ratio
-        self.layers = nn.ModuleList(
-            [
-                norm_f(Conv1d(channels, inner_channels, kernel_size, stride, dilation=dilation, padding=get_padding(kernel_size, dilation))),
-                norm_f(Conv1d(inner_channels, channels, 1, 1)),
-            ]
-        )
-        #self.layers.apply(init_weights)
-        self.se = SqueezeExcitation1D(channels, channels//4)
-
-    def forward(self, x):
-        for l in self.layers:
-            x = l(x)
-            x = F.leaky_relu(x, modules.LRELU_SLOPE)
-        x = self.se(x)
-        return x
-
-    def remove_weight_norm(self):
-        for l in self.layers:
-            remove_weight_norm(l)
-        remove_weight_norm(self.se)
-
-class MBConv1d(torch.nn.Module):
-    def __init__(self, channels, kernel_size, stride, dilation, extend_ratio, use_spectral_norm=False):
-        super(MBConv1d, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
-        inner_channels = channels * extend_ratio
-        self.layers = nn.ModuleList(
-            [
-                norm_f(Conv1d(channels, inner_channels, 1, 1)),
-                norm_f(Conv1d(inner_channels, inner_channels, kernel_size, stride, dilation=dilation, groups=inner_channels, padding=get_padding(kernel_size, dilation))),
-                norm_f(Conv1d(inner_channels, channels, 1, 1)),
-            ]
-        )
-        #self.layers.apply(init_weights)
-        self.se = SqueezeExcitation1D(channels, channels//4)
-
-    def forward(self, x):
-        for l in self.layers:
-            x = l(x)
-            x = F.leaky_relu(x, modules.LRELU_SLOPE)
-        x = self.se(x)
-        return x
-
-    def remove_weight_norm(self):
-        for l in self.layers:
-            remove_weight_norm(l)
-        remove_weight_norm(self.se)
-
-
-class Blaze1d(torch.nn.Module):
-    def __init__(self, channels, kernel_size, stride, dilation, extend_ratio, use_spectral_norm=False):
-        super(Blaze1d, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
-        inner_channels = channels * extend_ratio
-        self.layers = nn.ModuleList(
-            [
-                norm_f(Conv1d(channels, channels, kernel_size, stride, dilation=dilation, groups=channels, padding=get_padding(kernel_size, dilation))),
-                norm_f(Conv1d(channels, channels, 1, 1)),
-            ]
-        )
-        self.layers.apply(init_weights)
-        self.se = SqueezeExcitation1D(channels, channels//4)
-
-    def forward(self, x):
-        for l in self.layers:
-            x = l(x)
-        x = self.se(x)
-        x = F.leaky_relu(x, modules.LRELU_SLOPE)
-        return x
-
-    def remove_weight_norm(self):
-        for l in self.layers:
-            remove_weight_norm(l)
-        remove_weight_norm(self.se)
-
-class DoubleBlaze1d(torch.nn.Module):
-    def __init__(self, channels, kernel_size, stride, dilation, extend_ratio, use_spectral_norm=False):
-        super(DoubleBlaze1d, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
-        inner_channels = channels // 2
-        self.layers = nn.ModuleList(
-            [
-                norm_f(Conv1d(channels, channels, kernel_size, stride, dilation=dilation, groups=channels, padding=get_padding(kernel_size, dilation))),
-                norm_f(Conv1d(channels, inner_channels, 1, 1)),
-                norm_f(Conv1d(inner_channels, inner_channels, kernel_size, stride, dilation=dilation, groups=inner_channels, padding=get_padding(kernel_size, dilation))),
-                norm_f(Conv1d(inner_channels, channels, 1, 1)),
-            ]
-        )
-        #self.layers.apply(init_weights)
-        self.se = SqueezeExcitation1D(channels, channels//4)
-
-    def forward(self, x):
-        for l in self.layers:
-            x = l(x)
-            x = F.leaky_relu(x, modules.LRELU_SLOPE)
-        x = self.se(x)
-        return x
-
-    def remove_weight_norm(self):
-        for l in self.layers:
-            remove_weight_norm(l)
-        remove_weight_norm(self.se)
-
-
 class ResBlock1(torch.nn.Module):
-    def __init__(self, channels, kernel_size=3, dilation=(1, 3, 5), extend_ratio=4, fused=False):
+    def __init__(self, in_channels, out_channels, gin_channels, kernel_sizes, strides, dilations, extend_ratio, r):
         super(ResBlock1, self).__init__()
-        self.convs1 = nn.ModuleList(
-            [
-                weight_norm(
-                    Conv1d(
-                        channels,
-                        channels,
-                        kernel_size,
-                        1,
-                        dilation=dilation[0],
-                        padding=get_padding(kernel_size, dilation[0]),
-                    )
-                ),
-                weight_norm(
-                    Conv1d(
-                        channels,
-                        channels,
-                        kernel_size,
-                        1,
-                        dilation=dilation[1],
-                        padding=get_padding(kernel_size, dilation[1]),
-                    )
-                ),
-                weight_norm(
-                    Conv1d(
-                        channels,
-                        channels,
-                        kernel_size,
-                        1,
-                        dilation=dilation[2],
-                        padding=get_padding(kernel_size, dilation[2]),
-                    )
-                ),
-            ]
-        )
-        self.convs1.apply(init_weights)
+        norm_f = weight_norm 
+        inner_channels = int(in_channels * extend_ratio)
+        self.dconvs = nn.ModuleList()
+        self.pconvs = nn.ModuleList()
+        # self.norms = []
+        self.init_conv = LoRALinear1d(in_channels, inner_channels, gin_channels, r)
+        for i, (k, s, d) in enumerate(zip(kernel_sizes, strides, dilations)):
+            self.dconvs.append(norm_f(Conv1d(inner_channels, inner_channels, k, s, dilation=d, groups=inner_channels, padding=get_padding(k, d))))
+            if i < len(kernel_sizes) - 1:
+                self.pconvs.append(LoRALinear1d(inner_channels, inner_channels, gin_channels, r))
+        self.out_conv = LoRALinear1d(inner_channels, out_channels, gin_channels, r)
+        init_weights(self.init_conv)
+        self.dconvs.apply(init_weights)
+        self.pconvs.apply(init_weights)
+        init_weights(self.out_conv)
 
-        self.convs2 = nn.ModuleList(
-            [
-                weight_norm(
-                    Conv1d(
-                        channels,
-                        channels,
-                        kernel_size,
-                        1,
-                        dilation=1,
-                        padding=get_padding(kernel_size, 1),
-                    )
-                ),
-                weight_norm(
-                    Conv1d(
-                        channels,
-                        channels,
-                        kernel_size,
-                        1,
-                        dilation=1,
-                        padding=get_padding(kernel_size, 1),
-                    )
-                ),
-                weight_norm(
-                    Conv1d(
-                        channels,
-                        channels,
-                        kernel_size,
-                        1,
-                        dilation=1,
-                        padding=get_padding(kernel_size, 1),
-                    )
-                ),
-            ]
-        )
-        self.convs2.apply(init_weights)
-
-    def forward(self, x, x_mask=None):
-        for c1, c2 in zip(self.convs1, self.convs2):
-            xt = F.leaky_relu(x, LRELU_SLOPE)
-            if x_mask is not None:
-                xt = xt * x_mask
-            xt = c1(xt)
-            xt = F.leaky_relu(xt, LRELU_SLOPE)
-            if x_mask is not None:
-                xt = xt * x_mask
-            xt = c2(xt)
-            x = xt + x
+    def forward(self, x, g, x_mask=None):
         if x_mask is not None:
-            x = x * x_mask
+            x *= x_mask
+        x_ = self.init_conv(x, g)
+        x = F.leaky_relu(x_, modules.LRELU_SLOPE)
+        for i in range(len(self.dconvs)):
+            if x_mask is not None:
+                x *= x_mask
+            x_ = self.dconvs[i](x)
+            x = x + F.leaky_relu(x_, modules.LRELU_SLOPE)
+            if i < len(self.dconvs) - 1:
+                x_ = self.pconvs[i](x, g)
+                x = x + F.leaky_relu(x_, modules.LRELU_SLOPE)
+        if x_mask is not None:
+            x *= x_mask
+        x_ = self.out_conv(x, g)
+        x = F.leaky_relu(x_, modules.LRELU_SLOPE)
         return x
 
     def remove_weight_norm(self):
-        for l in self.convs1:
-            remove_weight_norm(l)
-        for l in self.convs2:
-            remove_weight_norm(l)
+        for c in self.dconvs:
+            remove_weight_norm(c)
+        for c in self.pconvs:
+            c.remove_weight_norm()
+        self.init_conv.remove_weight_norm()
+        self.out_conv.remove_weight_norm()
 
-
-class ResBlock3(torch.nn.Module):
-    def __init__(self, channels, kernel_size=3, dilation=(1, 3, 5), extend_ratio=4, fused=False):
-        super(ResBlock3, self).__init__()
-        conv_block_1 = FusedMBConv1d if fused else MBConv1d
-        conv_block_2 = FusedMBConv1d if fused else MBConv1d # Blaze1d # if fused else DoubleBlaze1d
-        self.convs1 = nn.ModuleList(
-            [
-                conv_block_1(
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=dilation[0],
-                    extend_ratio=extend_ratio,
-                    use_spectral_norm=False
-                ),
-                conv_block_1(
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=dilation[1],
-                    extend_ratio=extend_ratio,
-                    use_spectral_norm=False
-                ),
-                conv_block_1(
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=dilation[2],
-                    extend_ratio=extend_ratio,
-                    use_spectral_norm=False
-                ),
-            ]
-        )
-
-        self.convs2 = nn.ModuleList(
-            [
-                conv_block_2(
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=1,
-                    extend_ratio=extend_ratio,
-                    use_spectral_norm=False
-                ),
-                conv_block_2(
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=1,
-                    extend_ratio=extend_ratio,
-                    use_spectral_norm=False
-                ),
-                conv_block_2(
-                    channels,
-                    kernel_size,
-                    1,
-                    dilation=1,
-                    extend_ratio=extend_ratio,
-                    use_spectral_norm=False
-                ),
-            ]
-        )
-
-    def forward(self, x, x_mask=None):
-        for c1, c2 in zip(self.convs1, self.convs2):
-            if x_mask is not None:
-                x = x * x_mask
-            x = x + c1(x)
-            if x_mask is not None:
-                x = x * x_mask
-            x = x + c2(x)
-        if x_mask is not None:
-            x = x * x_mask
-        return x
-
-    def remove_weight_norm(self):
-        for l in self.convs1:
-            l.remove_weight_norm()
-        for l in self.convs2:
-            l.remove_weight_norm()
 
 class Log(nn.Module):
     def forward(self, x, x_mask, reverse=False, **kwargs):

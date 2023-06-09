@@ -28,63 +28,141 @@ def create_trained_model(
         if "enc_q" in key:
             continue
         state_dict["weight"][key] = weights[key].half()
-    write_config(
-        state_dict,
-        {
-            "spec_channels": 1025,
-            "segment_size": 32,
-            "inter_channels": 192,
-            "hidden_channels": 192,
-            "filter_channels": 768,
-            "n_heads": 2,
-            "n_layers": 6,
-            "kernel_size": 3,
-            "p_dropout": 0,
-            "resblock": "1",
-            "resblock_kernel_sizes": [
-            3,
-            7,
-            11
-            ],
-            "resblock_dilation_sizes": [
-            [
-                1,
+    if version == "v3":
+        write_config(
+            state_dict,
+            {
+                "spec_channels": 1025,
+                "segment_size": 32,
+                "inter_channels": 192,
+                "hidden_channels": 192,
+                "filter_channels": 768,
+                "n_heads": 6,
+                "n_layers": 6,
+                "kernel_size": 5,
+                "p_dropout": 0,
+                "resblock": "1",
+                "resblock_kernel_sizes": [
                 3,
-                5
-            ],
-            [
-                1,
-                3,
-                5
-            ],
-            [
-                1,
-                3,
-                5
-            ]
-            ],
-            "upsample_rates": [
-            10,
-            6,
-            2,
-            2,
-            2
-            ],
-            "upsample_initial_channel": 512,
-            "upsample_kernel_sizes": [
-            16,
-            16,
-            4,
-            4,
-            4
-            ],
-            "use_spectral_norm": False,
-            "gin_channels": 256,
-            "emb_channels": 768,
-            "spk_embed_dim": 109,
-            "sr": 48000,
-        },
-    )
+                7,
+                11
+                ],
+                "resblock_dilation_sizes": [
+                [
+                    1,
+                    3,
+                    5
+                ],
+                [
+                    1,
+                    3,
+                    5
+                ],
+                [
+                    1,
+                    3,
+                    5
+                ]
+                ],
+                "upsample_rates": [
+                6,
+                5,
+                4,
+                2,
+                2
+                ],
+                "upsample_initial_channel": 256,
+                "upsample_kernel_sizes": [
+                16,
+                16,
+                4,
+                4,
+                4
+                ],
+                "use_spectral_norm": False,
+                "gin_channels": 256,
+                "emb_channels": 768,
+                "spk_embed_dim": 109,
+                "sr": 48000,
+            },
+        )
+    else:
+        if sr == "40k":
+            write_config(
+                state_dict,
+                {
+                    "spec_channels": 1025,
+                    "segment_size": 32,
+                    "inter_channels": 192,
+                    "hidden_channels": 192,
+                    "filter_channels": 768,
+                    "n_heads": 2,
+                    "n_layers": 6,
+                    "kernel_size": 3,
+                    "p_dropout": 0,
+                    "resblock": "1",
+                    "resblock_kernel_sizes": [3, 7, 11],
+                    "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                    "upsample_rates": [10, 10, 2, 2],
+                    "upsample_initial_channel": 512,
+                    "upsample_kernel_sizes": [16, 16, 4, 4],
+                    "spk_embed_dim": 109,
+                    "gin_channels": 256,
+                    "emb_channels": emb_ch,
+                    "sr": 40000,
+                },
+            )
+        elif sr == "48k":
+            print(version, "48k saved")
+            write_config(
+                state_dict,
+                {
+                    "spec_channels": 1025,
+                    "segment_size": 32,
+                    "inter_channels": 192,
+                    "hidden_channels": 192,
+                    "filter_channels": 768,
+                    "n_heads": 2,
+                    "n_layers": 6,
+                    "kernel_size": 3,
+                    "p_dropout": 0,
+                    "resblock": "1",
+                    "resblock_kernel_sizes": [3, 7, 11],
+                    "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                    "upsample_rates": [10, 6, 2, 2, 2],
+                    "upsample_initial_channel": 512,
+                    "upsample_kernel_sizes": [16, 16, 4, 4, 4],
+                    "spk_embed_dim": 109,
+                    "gin_channels": 256,
+                    "emb_channels": emb_ch,
+                    "sr": 48000,
+                },
+            )
+        elif sr == "32k":
+            write_config(
+                state_dict,
+                {
+                    "spec_channels": 513,
+                    "segment_size": 32,
+                    "inter_channels": 192,
+                    "hidden_channels": 192,
+                    "filter_channels": 768,
+                    "n_heads": 2,
+                    "n_layers": 6,
+                    "kernel_size": 3,
+                    "p_dropout": 0,
+                    "resblock": "1",
+                    "resblock_kernel_sizes": [3, 7, 11],
+                    "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                    "upsample_rates": [10, 4, 2, 2, 2],
+                    "upsample_initial_channel": 512,
+                    "upsample_kernel_sizes": [16, 16, 4, 4, 4],
+                    "spk_embed_dim": 109,
+                    "gin_channels": 256,
+                    "emb_channels": emb_ch,
+                    "sr": 32000,
+                },
+            )
     state_dict["version"] = version
     state_dict["info"] = f"{epoch}epoch"
     state_dict["sr"] = sr

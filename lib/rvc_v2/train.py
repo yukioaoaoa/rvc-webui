@@ -4,6 +4,7 @@ import operator
 import os
 import sys
 import time
+from itertools import chain
 from random import shuffle
 from typing import *
 
@@ -33,10 +34,9 @@ from .models import MultiPeriodDiscriminator, SynthesizerTrnMs256NSFSid
 from .preprocessing.extract_feature import (MODELS_DIR, get_embedder,
                                             load_embedder)
 
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(parent_dir)
-# from rvc.models import MultiPeriodDiscriminator
-# from rvc.models import SynthesizerTrnMs256NSFSid
+#parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+#sys.path.append(parent_dir)
+#from rvc.models import SynthesizerTrnMs256NSFSid
 
 
 def is_audio_file(file: str):
@@ -445,7 +445,7 @@ def training_runner(
 
     train_loader = DataLoader(
         train_dataset,
-        num_workers = 8, # os.cpu_count(),
+        num_workers = os.cpu_count() // 2,
         shuffle=False,
         pin_memory=True,
         collate_fn=collate_fn,
@@ -470,10 +470,11 @@ def training_runner(
     if config.version == "v1":
         periods = [2, 3, 5, 7, 11, 17]
     elif config.version == "v2":
-        periods = [2, 3, 5, 7, 11, 17, 23, 37]
+        periods = [1, 2, 3, 5, 7, 11, 17, 23, 37]
     elif config.version == "v3":
-        periods = [2, 3, 5, 7, 11, 17, 23, 37]
-    net_d = MultiPeriodDiscriminator(config.model.use_spectral_norm, periods=periods)
+        periods = [1, 2, 3, 5, 7, 11, 17, 23, 37]
+    net_d = MultiPeriodDiscriminator(config.data.sampling_rate, periods=periods, **config.model.dict())
+    # net_d = MultiPeriodDiscriminator(use_spectral_norm=config.model.use_spectral_norm, periods=periods)
     if is_multi_process:
         net_d = net_d.cuda(rank)
     else:
@@ -486,7 +487,7 @@ def training_runner(
         eps=config.train.eps,
     )
     optim_d = torch.optim.AdamW(
-        net_d.parameters(),
+        chain(net_d.parameters(), net_g.emb_g.parameters()),
         config.train.learning_rate,
         betas=config.train.betas,
         eps=config.train.eps,
@@ -711,7 +712,7 @@ def training_runner(
                 if augment and step > 0:
                     with torch.no_grad():
                         new_phone = change_speaker(augment_net_g, augment_speaker_info, embedder, embedding_output_layer, phone, phone_lengths, pitch, pitchf, spec_lengths)
-                        weight = np.power(.8, step / len(train_dataset))  # 学習の初期はそのままのphone embeddingを使う
+                        weight = np.power(.9, step / len(train_dataset))  # 学習の初期はそのままのphone embeddingを使う
                         phone = phone * weight + new_phone * (1. - weight)
 
                 if f0:
@@ -720,6 +721,7 @@ def training_runner(
                         ids_slice,
                         x_mask,
                         z_mask,
+                        g,
                         (z, z_p, m_p, logs_p, m_q, logs_q),
                     ) = net_g(
                         phone, phone_lengths, pitch, pitchf, spec, spec_lengths, sid
@@ -730,6 +732,7 @@ def training_runner(
                         ids_slice,
                         x_mask,
                         z_mask,
+                        g,
                         (z, z_p, m_p, logs_p, m_q, logs_q),
                     ) = net_g(phone, phone_lengths, spec, spec_lengths, sid)
                 mel = spec_to_mel_torch(
@@ -743,6 +746,9 @@ def training_runner(
                 y_mel = commons.slice_segments(
                     mel, ids_slice, config.train.segment_size // config.data.hop_length
                 )
+                f0f = commons.slice_segments2(
+                    pitchf, ids_slice, config.train.segment_size // config.data.hop_length
+                )
                 with autocast(enabled=False):
                     y_hat_mel = mel_spectrogram_torch(
                         y_hat.float().squeeze(1),
@@ -754,13 +760,31 @@ def training_runner(
                         config.data.mel_fmin,
                         config.data.mel_fmax,
                     )
-                y_hat_mel = y_hat_mel.half()
                 wave = commons.slice_segments(
                     wave, ids_slice * config.data.hop_length, config.train.segment_size
                 )  # slice
+                y_hat, wave = y_hat[:, :, :wave.shape[2]], wave[:, :, :y_hat.shape[2]]
+                length = min(min(f0f.shape[1], y_mel.shape[2]), y_hat_mel.shape[2])
+                y_hat_mel, y_mel, f0f = y_hat_mel[:, :, :length], y_mel[:, :, :length], f0f[:, :length]
 
+                # Generator
+                y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(wave, y_hat, f0f, g.detach())
+                with autocast(enabled=False):
+                    loss_mel = F.l1_loss(y_mel, y_hat_mel) * config.train.c_mel
+                    loss_fm = feature_loss(fmap_r, fmap_g)
+                    loss_gen, losses_gen = generator_loss(y_d_hat_g)
+                    loss_gen_all = loss_gen + loss_fm  + loss_mel 
+            optim_g.zero_grad()
+            scaler.scale(loss_gen_all).backward()
+            scaler.unscale_(optim_g)
+            grad_norm_g = commons.clip_grad_value_(net_g.parameters(), None)
+            scaler.step(optim_g)
+            scaler.update()
+
+            g = net_g.emb_g(sid).unsqueeze(-1)
+            with autocast(enabled=config.train.fp16_run, dtype=torch.bfloat16):
                 # Discriminator
-                y_d_hat_r, y_d_hat_g, _, _ = net_d(wave, y_hat.detach())
+                y_d_hat_r, y_d_hat_g, _, _ = net_d(wave, y_hat.detach(), f0f, g)
                 with autocast(enabled=False):
                     loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(
                         y_d_hat_r, y_d_hat_g
@@ -768,23 +792,8 @@ def training_runner(
             optim_d.zero_grad()
             scaler.scale(loss_disc).backward()
             scaler.unscale_(optim_d)
-            grad_norm_d = commons.clip_grad_value_(net_d.parameters(), None)
+            grad_norm_d = commons.clip_grad_value_(chain(net_d.parameters(), net_g.emb_g.parameters()), None)
             scaler.step(optim_d)
-
-            with autocast(enabled=config.train.fp16_run, dtype=torch.bfloat16):
-                # Generator
-                y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(wave, y_hat)
-                with autocast(enabled=False):
-                    loss_mel = F.l1_loss(y_mel, y_hat_mel) * config.train.c_mel
-                    loss_fm = feature_loss(fmap_r, fmap_g)
-                    loss_gen, losses_gen = generator_loss(y_d_hat_g)
-                    loss_gen_all = loss_gen + loss_fm + loss_mel
-            optim_g.zero_grad()
-            scaler.scale(loss_gen_all).backward()
-            scaler.unscale_(optim_g)
-            grad_norm_g = commons.clip_grad_value_(net_g.parameters(), None)
-            scaler.step(optim_g)
-            scaler.update()
 
             if is_main_process:
                 progress_bar.set_postfix(
