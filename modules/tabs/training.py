@@ -9,11 +9,13 @@ from lib.rvc.preprocessing import extract_f0, extract_feature, split
 from lib.rvc.train import (create_dataset_meta, glob_dataset, train_index,
                            train_model)
 from lib.rvc_v2.train import train_model as train_model_v3
+from lib.rvc_vocos.train import train_model as train_model_vocos
 from modules import models, utils
 from modules.shared import MODELS_DIR, device, half_support
 from modules.ui import Tab
 
 SR_DICT = {
+    "24k": 24000,
     "32k": 32000,
     "40k": 40000,
     "48k": 48000,
@@ -244,7 +246,7 @@ class Training(Tab):
                 augment_path = None
                 speaker_info_path = None
 
-            if version != "v3":
+            if version in ["v1", "v2"]:
                 train_model(
                     gpu_ids,
                     config,
@@ -267,7 +269,7 @@ class Training(Tab):
                     False,
                     None if len(gpu_ids) > 1 else device,
                 )
-            else:
+            elif version == "v3":
                 train_model_v3(
                     gpu_ids,
                     config,
@@ -290,7 +292,29 @@ class Training(Tab):
                     False,
                     None if len(gpu_ids) > 1 else device,
                 )
-
+            elif version == "vocos":
+                train_model_vocos(
+                    gpu_ids,
+                    config,
+                    training_dir,
+                    model_name,
+                    out_dir,
+                    sampling_rate_str,
+                    f0,
+                    batch_size,
+                    augment,
+                    augment_path,
+                    speaker_info_path,
+                    cache_batch,
+                    num_epochs,
+                    save_every_epoch,
+                    pre_trained_bottom_model_g,
+                    pre_trained_bottom_model_d,
+                    embedder_name,
+                    int(embedding_output_layer),
+                    False,
+                    None if len(gpu_ids) > 1 else device,
+                )
             yield "Training index..."
             if run_train_index:
                 if not reduce_index_size:
@@ -331,12 +355,12 @@ class Training(Tab):
 
                     with gr.Row().style(equal_height=False):
                         version = gr.Radio(
-                            choices=["v1", "v2", "v3"],
+                            choices=["v3", "vocos"],
                             value="v2",
                             label="Model version",
                         )
                         target_sr = gr.Radio(
-                            choices=["32k", "40k", "48k"],
+                            choices=["24k", "32k", "40k", "48k"],
                             value="40k",
                             label="Target sampling rate",
                         )
