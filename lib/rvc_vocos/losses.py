@@ -9,7 +9,7 @@ class MelLoss(nn.Module):
     Single-scale Spectral Loss. 
     """
 
-    def __init__(self, sample_rate, n_fft, win_length, hop_length, f_min, f_max, eps=1e-7, device="cuda"):
+    def __init__(self, sample_rate, n_fft, win_length, hop_length, f_min, f_max, eps=1e-5, device="cuda"):
         super().__init__()
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -21,26 +21,22 @@ class MelLoss(nn.Module):
             hop_length=hop_length,
             f_min=f_min,
             f_max=f_max,
-            window_fn=torch.hann_window,
             center=True,
-            power=1,
-            norm="slaney",
-            mel_scale="slaney"
+            power=1
         )
 
     def forward(self, x_true, x_pred):
         x_true = torch.nn.functional.pad(
-            x_true,
+            x_true.float(),
             (int((self.n_fft - self.hop_length) / 2), int((self.n_fft - self.hop_length) / 2)),
             mode="reflect",
         )
 
         x_pred = torch.nn.functional.pad(
-            x_pred,
+            x_pred.float(),
             (int((self.n_fft - self.hop_length) / 2), int((self.n_fft - self.hop_length) / 2)),
             mode="reflect",
         )
-        x_pred = x_pred
 
         S_true = torch.log(torch.clamp(self.melspec(x_true), min=self.eps))
         S_pred = torch.log(torch.clamp(self.melspec(x_pred), min=self.eps))
@@ -56,7 +52,7 @@ def feature_loss(fmap_r, fmap_g):
             rl = rl.float().detach()
             gl = gl.float()
             loss += torch.mean(torch.abs(rl - gl))
-    return loss * 2
+    return loss
 
 
 def discriminator_loss(disc_real_outputs, disc_generated_outputs):
@@ -74,7 +70,6 @@ def discriminator_loss(disc_real_outputs, disc_generated_outputs):
 
     return loss, r_losses, g_losses
 
-
 def generator_loss(disc_outputs):
     loss = 0
     gen_losses = []
@@ -85,4 +80,3 @@ def generator_loss(disc_outputs):
         loss += l
 
     return loss, gen_losses
-

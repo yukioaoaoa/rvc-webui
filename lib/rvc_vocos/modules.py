@@ -124,6 +124,32 @@ class LoRALinear2d(nn.Module):
         remove_weight_norm(self.adapter_out)
 
 
+class MBConv2d(torch.nn.Module):
+    """
+    Causal MBConv2D
+    """
+    def __init__(self, in_channels, out_channels, gin_channels, kernel_size, stride, extend_ratio, r, use_spectral_norm=False):
+        super(MBConv2d, self).__init__()
+        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
+        inner_channels = int(in_channels * extend_ratio)
+        self.kernel_size = kernel_size
+        self.pwconv1 = LoRALinear2d(in_channels, inner_channels, gin_channels, r=r)
+        self.dwconv = norm_f(Conv2d(inner_channels, inner_channels, kernel_size, stride, groups=inner_channels))
+        self.pwconv2 = LoRALinear2d(inner_channels, out_channels, gin_channels, r=r)
+        self.pwnorm = LayerNorm(in_channels)
+        self.dwnorm = LayerNorm(inner_channels)
+
+    def forward(self, x, g):
+        x = self.pwnorm(x)
+        x = self.pwconv1(x, g)
+        x = F.pad(x, [0, 0, self.kernel_size[0] - 1, 0], mode="constant")
+        x = self.dwnorm(x)
+        x = self.dwconv(x)
+        x = F.leaky_relu(x, modules.LRELU_SLOPE)
+        x = self.pwconv2(x, g)
+        x = F.leaky_relu(x, modules.LRELU_SLOPE)
+        return x
+
 class ConvNext2d(torch.nn.Module):
     """
     Causal ConvNext Block
@@ -147,6 +173,7 @@ class ConvNext2d(torch.nn.Module):
         x = self.pwconv1(x, g)
         x = self.act(x)
         x = self.pwconv2(x, g)
+        x = self.act(x)
         return x
 
     def remove_weight_norm(self):
@@ -156,12 +183,13 @@ class ConvNext2d(torch.nn.Module):
 class WaveBlock(torch.nn.Module):
     def __init__(self, inner_channels, gin_channels, kernel_sizes, strides, dilations, extend_ratio, r):
         super(WaveBlock, self).__init__()
-        norm_f = weight_norm 
+        norm_f = weight_norm
         extend_channels = int(inner_channels * extend_ratio)
         self.dconvs = nn.ModuleList()
         self.p1convs = nn.ModuleList()
         self.p2convs = nn.ModuleList()
         self.norms = nn.ModuleList()
+        self.act = nn.GELU()
 
         # self.ses = nn.ModuleList()
         # self.norms = []
@@ -170,12 +198,11 @@ class WaveBlock(torch.nn.Module):
             self.p1convs.append(LoRALinear1d(inner_channels, extend_channels, gin_channels, r))
             self.p2convs.append(LoRALinear1d(extend_channels, inner_channels, gin_channels, r))
             self.norms.append(LayerNorm(inner_channels))
-        self.act = nn.GELU()
 
     def forward(self, x, x_mask, g):
         x *= x_mask
         for i in range(len(self.dconvs)):
-            residual = x
+            residual = x.clone()
             x = self.dconvs[i](x)
             x = self.norms[i](x)
             x *= x_mask
@@ -294,13 +321,13 @@ class ISTFTHead(FourierHead):
         padding (str, optional): Type of padding. Options are "center" or "same". Defaults to "same".
     """
 
-    def __init__(self, dim: int, n_fft: int, hop_length: int, padding: str = "same"):
+    def __init__(self, dim: int, gin_channels: int, n_fft: int, hop_length: int, padding: str = "same"):
         super().__init__()
         out_dim = n_fft + 2
-        self.out = Conv1d(dim, out_dim, 1)
+        self.out = LoRALinear1d(dim, out_dim, gin_channels, 2)
         self.istft = ISTFT(n_fft=n_fft, hop_length=hop_length, win_length=n_fft, padding=padding)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the ISTFTHead module.
 
@@ -311,16 +338,16 @@ class ISTFTHead(FourierHead):
         Returns:
             Tensor: Reconstructed time-domain audio signal of shape (B, T), where T is the length of the output signal.
         """
-        x = self.out(x)
+        x = self.out(x, g)
         mag, p = x.chunk(2, dim=1)
-        mag = torch.exp(mag)
-        mag = torch.clip(mag, max=1e2)  # safeguard to prevent excessively large magnitudes
+        p = torch.clamp(p, min=-2*math.pi, max=2*math.pi)
+        mag = torch.clip(torch.exp(mag), max=1e2)  # safeguard to prevent excessively large magnitudes
         x = torch.cos(p)
         y = torch.sin(p)
         phase = torch.atan2(y, x)
         S = mag * torch.exp(phase * 1j)
         audio = self.istft(S)
-        return audio.unsqueeze(1)
+        return torch.clamp(audio.unsqueeze(1), min=-1., max=1.)
 
 
 def symexp(x: torch.Tensor) -> torch.Tensor:

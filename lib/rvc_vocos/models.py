@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.nn import Conv2d
 from torch.nn import functional as F
-from torch.nn.utils import spectral_norm, weight_norm
+from torch.nn.utils import remove_weight_norm, spectral_norm, weight_norm
 
 from . import commons, modules
 from .commons import get_padding
@@ -35,24 +35,30 @@ class GeneratorVocos(torch.nn.Module):
     ):
         super(GeneratorVocos, self).__init__()
         self.n_layers = n_layers
-
+        self.emb_pitch = nn.Embedding(256, gin_channels)  # pitch 256
+        self.plinear = LoRALinear1d(gin_channels, inter_channels, gin_channels, r=8)
+        self.glinear = weight_norm(nn.Conv1d(gin_channels, inter_channels, 1))
         self.resblocks = nn.ModuleList()
-        self.init_conv = LoRALinear1d(emb_channels, inter_channels, gin_channels, r=4)
+        self.init_linear = LoRALinear1d(emb_channels, inter_channels, gin_channels, r=2)
         for _ in range(self.n_layers):
-            self.resblocks.append(WaveBlock(inter_channels, gin_channels, [11] * 3, [1] * 3, [1, 2, 4], 2, r=4))
-        self.head = ISTFTHead(inter_channels, n_fft=n_fft, hop_length=hop_length)
+            self.resblocks.append(WaveBlock(inter_channels, gin_channels, [11] * 3, [1] * 3, [1, 2, 4], 2, r=2))
+        self.head = ISTFTHead(inter_channels, gin_channels, n_fft=n_fft, hop_length=hop_length)
 
-    def forward(self, x, x_mask, g):
-        x = self.init_conv(x, g)
+    def forward(self, x, pitch, x_mask, g):
+        x = self.init_linear(x, g)
+        p = torch.transpose(self.emb_pitch(pitch), 1, -1)
+        x = x + self.plinear(p, g) + self.glinear(g)
         for i in range(self.n_layers):
             x = self.resblocks[i](x, x_mask, g)
-        x = self.head(x)
+        x = self.head(x, g)
         return x
 
     def remove_weight_norm(self):
         for l in self.resblocks:
             l.remove_weight_norm()
-        self.init_conv.remove_weight_norm()
+        remove_weight_norm(self.glinear)
+        self.init_linear.remove_weight_norm()
+        self.plinear.remove_weight_norm()
 
 
 class SynthesizerTrnMs256NSFSid(nn.Module):
@@ -82,7 +88,6 @@ class SynthesizerTrnMs256NSFSid(nn.Module):
         self.emb_channels = emb_channels
         self.sr = sr
 
-        self.emb_pitch = nn.Embedding(256, emb_channels)  # pitch 256
         self.dec = GeneratorVocos(
             emb_channels,
             inter_channels,
@@ -109,22 +114,21 @@ class SynthesizerTrnMs256NSFSid(nn.Module):
         self, phone, phone_lengths, pitch, pitchf, ds
         ):
         g = self.emb_g(ds).unsqueeze(-1)
-        x = phone + self.emb_pitch(pitch)
-        x = torch.transpose(x, 1, -1)
+        x = torch.transpose(phone, 1, -1)
         x_mask = torch.unsqueeze(commons.sequence_mask(phone_lengths, x.size(2)), 1).to(phone.dtype)
-        m_p_slice, ids_slice = commons.rand_slice_segments(
+        x_slice, ids_slice = commons.rand_slice_segments(
             x, phone_lengths, self.segment_size
         )
+        pitch_slice = commons.slice_segments2(pitch, ids_slice, self.segment_size)
         mask_slice = commons.slice_segments(x_mask, ids_slice, self.segment_size)
-        o = self.dec(m_p_slice, mask_slice, g)
+        o = self.dec(x_slice, pitch_slice, mask_slice, g)
         return o, ids_slice, x_mask, g
 
     def infer(self, phone, phone_lengths, pitch, nsff0, sid, max_len=None):
         g = self.emb_g(sid).unsqueeze(-1)
-        x = phone + self.emb_pitch(pitch)
-        x = torch.transpose(x, 1, -1)
+        x = torch.transpose(phone, 1, -1)
         x_mask = torch.unsqueeze(commons.sequence_mask(phone_lengths, x.size(2)), 1).to(phone.dtype)
-        o = self.dec((x * x_mask)[:, :, :max_len], x_mask, g)
+        o = self.dec((x * x_mask)[:, :, :max_len], pitch, x_mask, g)
         return o, x_mask, (None, None, None, None)
 
 
@@ -136,7 +140,7 @@ class DiscriminatorP(torch.nn.Module):
         self.init_kernel_size = upsample_rates[-1] * 3
         norm_f = weight_norm if use_spectral_norm == False else spectral_norm
         N = len(upsample_rates)
-        self.init_conv = norm_f(Conv2d(1, final_dim // (2 ** (N - 1)), (upsample_rates[-1] * 3, 1), (upsample_rates[-1], 1)))
+        self.init_conv = norm_f(Conv2d(1, final_dim // (2 ** (N - 1)), (self.init_kernel_size, 1), (upsample_rates[-1], 1)))
         self.convs = nn.ModuleList()
         for i, u in enumerate(upsample_rates[::-1][1:], start=1):
             self.convs.append(
@@ -147,7 +151,7 @@ class DiscriminatorP(torch.nn.Module):
                     (u*3, 1),
                     (u, 1),
                     4,
-                    r=2 + i//2
+                    r=2
                 )
             )
         self.conv_post = weight_norm(Conv2d(final_dim, 1, (3, 1), (1, 1)))

@@ -37,7 +37,7 @@ def create_trained_model(
             "hop_length": 240,
             "emb_channels": 768,
             "inter_channels": 512,
-            "n_layers": 6,
+            "n_layers": 4,
             "upsample_rates": [
             5,
             3,
@@ -45,7 +45,7 @@ def create_trained_model(
             4
             ],
             "use_spectral_norm": False,
-            "gin_channels": 512,
+            "gin_channels": 256,
             "spk_embed_dim": 109,
             "sr": 24000,
         },
