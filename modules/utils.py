@@ -68,7 +68,7 @@ def load_config(
     if version == "v3":
         assert sample_rate == "48k"
         config_path = os.path.join(ROOT_DIR, "configs", f"48k-v3.json")
-    if version == "vocos":
+    elif version == "vocos":
         assert sample_rate == "24k"
         config_path = os.path.join(ROOT_DIR, "configs", f"24k-vocos.json")
     elif emb_channels == 256:
@@ -77,7 +77,7 @@ def load_config(
         config_path = os.path.join(
             ROOT_DIR, "configs", f"{sample_rate}-{emb_channels}.json"
         )
-
+    print(config_path)
     if version == "vocos":
         config = VocosTrainConfig.parse_file(config_path)
     else:

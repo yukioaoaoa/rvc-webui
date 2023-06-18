@@ -12,7 +12,7 @@
     "batch_size": 4,
     "fp16_run": true,
     "lr_decay": 0.999875,
-    "segment_size": 48000,
+    "segment_size": 72000,
     "init_lr_ratio": 1,
     "warmup_epochs": 0,
     "c_mel": 45,
@@ -29,8 +29,8 @@
     "mel_fmax": null
   },
   "model": {
-    "inter_channels": 192,
-    "hidden_channels": 192,
+    "inter_channels": 768,
+    "hidden_channels": 768,
     "filter_channels": 768,
     "n_heads": 6,
     "n_layers": 6,
@@ -60,13 +60,12 @@
       ]
     ],
     "upsample_rates": [
-      6,
       5,
+      6,
       4,
-      2,
-      2
+      4
     ],
-    "upsample_initial_channel": 256,
+    "upsample_initial_channel": 512,
     "upsample_kernel_sizes": [
       16,
       16,

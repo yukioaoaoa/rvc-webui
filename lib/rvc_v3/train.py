@@ -28,11 +28,12 @@ from .config import DatasetMetadata, TrainConfig
 from .data_utils import (DistributedBucketSampler, TextAudioCollate,
                          TextAudioCollateMultiNSFsid, TextAudioLoader,
                          TextAudioLoaderMultiNSFsid)
-from .losses import discriminator_loss, feature_loss, generator_loss, kl_loss
+from .losses import MelLoss, discriminator_loss, feature_loss, generator_loss
 from .mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 from .models import MultiPeriodDiscriminator, SynthesizerTrnMs256NSFSid
 from .preprocessing.extract_feature import (MODELS_DIR, get_embedder,
                                             load_embedder)
+from .utils import AWP
 
 #parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #sys.path.append(parent_dir)
@@ -199,7 +200,7 @@ def change_speaker(net_g, speaker_info, embedder, embedding_output_layer, phone,
     feats = torch.repeat_interleave(feats, 2, 1)
     new_phone = torch.zeros(phone.shape).to(device, dtype)
     new_phone[:, :feats.shape[1]] = feats[:, :phone.shape[1]]
-    return new_phone.to(device)
+    return new_phone.to(device), new_wave
 
 
 def train_index(
@@ -467,31 +468,33 @@ def training_runner(
     else:
         net_g = net_g.to(device=device)
 
-    if config.version == "v1":
-        periods = [2, 3, 5, 7, 11, 17]
-    elif config.version == "v2":
+    if config.version == "v3":
         periods = [1, 2, 3, 5, 7, 11, 17, 23, 37]
-    elif config.version == "v3":
-        periods = [1, 2, 3, 5, 7, 11, 17, 23, 37]
-    net_d = MultiPeriodDiscriminator(config.data.sampling_rate, periods=periods, **config.model.dict())
+    else:
+        raise
+    net_d = MultiPeriodDiscriminator(periods=periods, **config.model.dict())
     # net_d = MultiPeriodDiscriminator(use_spectral_norm=config.model.use_spectral_norm, periods=periods)
     if is_multi_process:
         net_d = net_d.cuda(rank)
     else:
         net_d = net_d.to(device=device)
 
-    optim_g = torch.optim.AdamW(
+    # in GAN, weight decay inn't need
+    # https://github.com/juntang-zhuang/Adabelief-Optimizer
+    optim_g = torch.optim.Adam(
         net_g.parameters(),
         config.train.learning_rate,
         betas=config.train.betas,
         eps=config.train.eps,
     )
-    optim_d = torch.optim.AdamW(
+    optim_d = torch.optim.Adam(
         chain(net_d.parameters(), net_g.emb_g.parameters()),
         config.train.learning_rate,
         betas=config.train.betas,
         eps=config.train.eps,
     )
+
+    awp = AWP(net_g, optim_g, adv_lr=1e-3, adv_eps=1e-2)
 
     if is_multi_process:
         net_g = DDP(net_g, device_ids=[rank])
@@ -538,42 +541,6 @@ def training_runner(
         global_step = 0
         if os.path.exists(pretrain_g) and os.path.exists(pretrain_d):
             net_g_state = torch.load(pretrain_g, map_location="cpu")["model"]
-            emb_phone_size = (config.model.hidden_channels, config.model.emb_channels)
-            if emb_phone_size != net_g_state["enc_p.emb_phone.weight"].size():
-                # interpolate
-                orig_shape = net_g_state["enc_p.emb_phone.weight"].size()
-                if net_g_state["enc_p.emb_phone.weight"].dtype == torch.half:
-                    net_g_state["enc_p.emb_phone.weight"] = (
-                        F.interpolate(
-                            net_g_state["enc_p.emb_phone.weight"]
-                            .float()
-                            .unsqueeze(0)
-                            .unsqueeze(0),
-                            size=emb_phone_size,
-                            mode="bilinear",
-                        )
-                        .half()
-                        .squeeze(0)
-                        .squeeze(0)
-                    )
-                else:
-                    net_g_state["enc_p.emb_phone.weight"] = (
-                        F.interpolate(
-                            net_g_state["enc_p.emb_phone.weight"]
-                            .unsqueeze(0)
-                            .unsqueeze(0),
-                            size=emb_phone_size,
-                            mode="bilinear",
-                        )
-                        .squeeze(0)
-                        .squeeze(0)
-                    )
-                print(
-                    "interpolated pretrained state enc_p.emb_phone from",
-                    orig_shape,
-                    "to",
-                    emb_phone_size,
-                )
             if is_multi_process:
                 net_g.module.load_state_dict(net_g_state)
             else:
@@ -610,10 +577,21 @@ def training_runner(
 
     scaler = GradScaler(enabled=config.train.fp16_run)
 
+    mel_loss = MelLoss(
+        sample_rate=int(sample_rate[:-1] + "000"),
+        n_fft=config.data.filter_length,
+        win_length=config.data.win_length,
+        hop_length=config.data.hop_length,
+        f_min=config.data.mel_fmin,
+        f_max=config.data.mel_fmax
+    ).to(device=device)
+
     cache = []
     progress_bar = tqdm.tqdm(range((total_epoch - epoch + 1) * len(train_loader)))
     progress_bar.set_postfix(epoch=epoch)
-    step = -1 + len(train_loader) * epoch
+    step = -1 + len(train_loader) * (epoch - 1)
+    optim_g.zero_grad()
+    optim_d.zero_grad()
     for epoch in range(epoch, total_epoch + 1):
         train_loader.batch_sampler.set_epoch(epoch)
 
@@ -707,93 +685,79 @@ def training_runner(
                                 ),
                             )
                         )
+            if step > 0:
+                awp.perturb()
 
             with autocast(enabled=config.train.fp16_run, dtype=torch.bfloat16):
-                if augment and step > 0:
+                if augment and step > 5 * len(train_loader):
                     with torch.no_grad():
-                        new_phone = change_speaker(augment_net_g, augment_speaker_info, embedder, embedding_output_layer, phone, phone_lengths, pitch, pitchf, spec_lengths)
-                        weight = np.power(.9, step / len(train_dataset))  # 学習の初期はそのままのphone embeddingを使う
-                        phone = phone * weight + new_phone * (1. - weight)
+                        new_phone, new_wave = change_speaker(augment_net_g, augment_speaker_info, embedder, embedding_output_layer, phone, phone_lengths, pitch, pitchf, spec_lengths)
+                        weight = (1 - np.power(.8, (step - 5 * len(train_loader)) / len(train_loader))) * torch.rand(phone.shape[0], 1, 1).to(phone.device, phone.dtype) # 学習の初期はそのままのphone embeddingを使う
+                        phone = phone * (1. - weight) + new_phone * weight
 
-                if f0:
-                    (
-                        y_hat,
-                        ids_slice,
-                        x_mask,
-                        z_mask,
-                        g,
-                        (z, z_p, m_p, logs_p, m_q, logs_q),
-                    ) = net_g(
-                        phone, phone_lengths, pitch, pitchf, spec, spec_lengths, sid
-                    )
-                else:
-                    (
-                        y_hat,
-                        ids_slice,
-                        x_mask,
-                        z_mask,
-                        g,
-                        (z, z_p, m_p, logs_p, m_q, logs_q),
-                    ) = net_g(phone, phone_lengths, spec, spec_lengths, sid)
-                mel = spec_to_mel_torch(
-                    spec,
-                    config.data.filter_length,
-                    config.data.n_mel_channels,
-                    config.data.sampling_rate,
-                    config.data.mel_fmin,
-                    config.data.mel_fmax,
-                )
-                y_mel = commons.slice_segments(
-                    mel, ids_slice, config.train.segment_size // config.data.hop_length
+                (
+                    y_hat,
+                    ids_slice,
+                    x_mask,
+                    g
+                ) = net_g(
+                    phone, phone_lengths, pitch, pitchf, wave, wave_lengths, sid
                 )
                 f0f = commons.slice_segments2(
                     pitchf, ids_slice, config.train.segment_size // config.data.hop_length
                 )
-                with autocast(enabled=False):
-                    y_hat_mel = mel_spectrogram_torch(
-                        y_hat.float().squeeze(1),
-                        config.data.filter_length,
-                        config.data.n_mel_channels,
-                        config.data.sampling_rate,
-                        config.data.hop_length,
-                        config.data.win_length,
-                        config.data.mel_fmin,
-                        config.data.mel_fmax,
-                    )
                 wave = commons.slice_segments(
                     wave, ids_slice * config.data.hop_length, config.train.segment_size
                 )  # slice
                 y_hat, wave = y_hat[:, :, :wave.shape[2]], wave[:, :, :y_hat.shape[2]]
-                length = min(min(f0f.shape[1], y_mel.shape[2]), y_hat_mel.shape[2])
-                y_hat_mel, y_mel, f0f = y_hat_mel[:, :, :length], y_mel[:, :, :length], f0f[:, :length]
 
                 # Generator
-                y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(wave, y_hat, f0f, g.detach())
+                y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(wave, y_hat, g.detach())
                 with autocast(enabled=False):
-                    loss_mel = F.l1_loss(y_mel, y_hat_mel) * config.train.c_mel
+                    loss_mel = mel_loss(y_hat.float(), wave.float()) * config.train.c_mel
                     loss_fm = feature_loss(fmap_r, fmap_g)
                     loss_gen, losses_gen = generator_loss(y_d_hat_g)
-                    loss_gen_all = loss_gen + loss_fm  + loss_mel 
+                    loss_gen_all = loss_gen + loss_fm  + loss_mel
             optim_g.zero_grad()
-            scaler.scale(loss_gen_all).backward()
-            scaler.unscale_(optim_g)
+            if config.train.fp16_run:
+                scaler.scale(loss_gen_all).backward()
+                scaler.unscale_(optim_g)
+            else:
+                loss_gen_all.backward()
+            awp.restore()
             grad_norm_g = commons.clip_grad_value_(net_g.parameters(), None)
-            scaler.step(optim_g)
-            scaler.update()
+            if np.all([torch.all(torch.isfinite(p.grad)).detach().cpu().numpy() for p in net_g.parameters() if p.requires_grad and type(p.grad) is torch.Tensor]):
+                if config.train.fp16_run:
+                    scaler.step(optim_g)
+                    scaler.update()
+                else:
+                    optim_g.step()
+            else:
+                print("contains nan generator")
 
-            g = net_g.emb_g(sid).unsqueeze(-1)
+            optim_d.zero_grad()
             with autocast(enabled=config.train.fp16_run, dtype=torch.bfloat16):
                 # Discriminator
-                y_d_hat_r, y_d_hat_g, _, _ = net_d(wave, y_hat.detach(), f0f, g)
+                g = net_g.emb_g(sid).unsqueeze(-1)
+                y_d_hat_r, y_d_hat_g, _, _ = net_d(wave, y_hat.detach(), g)
                 with autocast(enabled=False):
                     loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(
                         y_d_hat_r, y_d_hat_g
                     )
-            optim_d.zero_grad()
-            scaler.scale(loss_disc).backward()
-            scaler.unscale_(optim_d)
+            if config.train.fp16_run:
+                scaler.scale(loss_disc).backward()
+                scaler.unscale_(optim_d)
+            else:
+                loss_disc.backward()
             grad_norm_d = commons.clip_grad_value_(chain(net_d.parameters(), net_g.emb_g.parameters()), None)
-            scaler.step(optim_d)
+            if np.all([torch.all(torch.isfinite(p.grad)).detach().cpu().numpy() for p in chain(net_d.parameters(), net_g.emb_g.parameters()) if p.requires_grad and type(p.grad) is torch.Tensor]):
+                if config.train.fp16_run:
+                    scaler.step(optim_d)
+                    scaler.update()
+                else:
+                    optim_d.step()
+            else:
+                print("contains nan discriminater")
 
             if is_main_process:
                 progress_bar.set_postfix(
@@ -804,6 +768,38 @@ def training_runner(
                     use_cache=use_cache,
                 )
                 if global_step % config.train.log_interval == 0:
+                    if augment and step > 5 * len(train_loader):
+                        new_wave = commons.slice_segments(
+                            new_wave, ids_slice * config.data.hop_length, config.train.segment_size
+                        )
+                    for i in range(4):
+                        torchaudio.save(filepath=os.path.join(training_dir, "logs", f"y_true_{i:02}.wav"), src=wave[i].detach().cpu().float(), sample_rate=int(sample_rate[:-1] + "000"))
+                        torchaudio.save(filepath=os.path.join(training_dir, "logs", f"y_pred_{i:02}.wav"), src=y_hat[i].detach().cpu().float(), sample_rate=int(sample_rate[:-1] + "000"))
+                        if augment and step > 5 * len(train_loader):
+                            torchaudio.save(filepath=os.path.join(training_dir, "logs", f"y_aug_{i:02}.wav"), src=new_wave[i].detach().cpu().float(), sample_rate=int(sample_rate[:-1] + "000"))
+                    with torch.no_grad():
+                        mel = spec_to_mel_torch(
+                            spec,
+                            config.data.filter_length,
+                            config.data.n_mel_channels,
+                            config.data.sampling_rate,
+                            config.data.mel_fmin,
+                            config.data.mel_fmax,
+                        )
+                        y_mel = commons.slice_segments(
+                            mel, ids_slice, config.train.segment_size // config.data.hop_length
+                        )
+                        with autocast(enabled=False):
+                            y_hat_mel = mel_spectrogram_torch(
+                                y_hat.float().squeeze(1),
+                                config.data.filter_length,
+                                config.data.n_mel_channels,
+                                config.data.sampling_rate,
+                                config.data.hop_length,
+                                config.data.win_length,
+                                config.data.mel_fmin,
+                                config.data.mel_fmax,
+                            )
                     lr = optim_g.param_groups[0]["lr"]
                     # Amor For Tensorboard display
                     if loss_mel > 50:

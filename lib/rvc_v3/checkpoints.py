@@ -34,8 +34,8 @@ def create_trained_model(
             {
                 "spec_channels": 1025,
                 "segment_size": 32,
-                "inter_channels": 192,
-                "hidden_channels": 192,
+                "inter_channels": 768,
+                "hidden_channels": 768,
                 "filter_channels": 768,
                 "n_heads": 6,
                 "n_layers": 6,
@@ -65,13 +65,12 @@ def create_trained_model(
                 ]
                 ],
                 "upsample_rates": [
-                6,
                 5,
+                6,
                 4,
-                2,
-                2
+                4
                 ],
-                "upsample_initial_channel": 256,
+                "upsample_initial_channel": 512,
                 "upsample_kernel_sizes": [
                 16,
                 16,
@@ -202,3 +201,4 @@ def save(
     )
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     torch.save(state_dict, filepath)
+
