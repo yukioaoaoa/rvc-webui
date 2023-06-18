@@ -1,4 +1,5 @@
 import os
+from typing import *
 
 import ffmpeg
 import numpy as np
@@ -7,6 +8,7 @@ import torch
 from tqdm import tqdm
 
 from lib.rvc.config import TrainConfig
+from lib.rvc_vocos.config import TrainConfig as VocosTrainConfig
 from modules.shared import ROOT_DIR
 
 
@@ -34,7 +36,6 @@ def get_gpus():
     return [torch.device(f"cuda:{i}") for i in range(num_gpus)]
 
 
-
 def download_file(url: str, out: str, position: int = 0, show: bool = True):
     req = requests.get(url, stream=True, allow_redirects=True)
     content_length = req.headers.get("content-length")
@@ -57,15 +58,31 @@ def download_file(url: str, out: str, position: int = 0, show: bool = True):
                 f.write(chunk)
 
 
-def load_config(training_dir: str, sample_rate: str, emb_channels: int, fp16: bool):
-    if emb_channels == 256:
+def load_config(
+    version: Literal["v1", "v2", "v3", "vocos"],
+    training_dir: str,
+    sample_rate: str,
+    emb_channels: int,
+    fp16: bool,
+):
+    if version == "v3":
+        assert sample_rate == "48k"
+        config_path = os.path.join(ROOT_DIR, "configs", f"48k-v3.json")
+    elif version == "vocos":
+        assert sample_rate == "24k"
+        config_path = os.path.join(ROOT_DIR, "configs", f"24k-vocos.json")
+    elif emb_channels == 256:
         config_path = os.path.join(ROOT_DIR, "configs", f"{sample_rate}.json")
     else:
         config_path = os.path.join(
             ROOT_DIR, "configs", f"{sample_rate}-{emb_channels}.json"
         )
-
-    config = TrainConfig.parse_file(config_path)
+    print(config_path)
+    if version == "vocos":
+        config = VocosTrainConfig.parse_file(config_path)
+    else:
+        config = TrainConfig.parse_file(config_path)
+    config.version = version
     config.train.fp16_run = fp16
 
     config_save_path = os.path.join(training_dir, "config.json")

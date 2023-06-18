@@ -36,10 +36,6 @@ def load_embedder(embedder_path: str, device):
         )
         embedder_model = models[0]
         embedder_model = embedder_model.to(device)
-        if device != "cpu":
-            embedder_model = embedder_model.half()
-        else:
-            embedder_model = embedder_model.float()
         embedder_model.eval()
     except Exception as e:
         print(f"Error: {e} {embedder_path}")
