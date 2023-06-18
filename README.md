@@ -1,7 +1,8 @@
-<h1 align="center">RVC-WebUI</h1>
+<h1 align="center">RVC-WebUI(v3デモ用フォーク)</h1>
 <div align="center">
 <p>
-
+これはv3モデルの試作用リポジトリです。
+それ以外の用途の方はフォーク元に移動してください。
 [`liujing04/Retrieval-based-Voice-Conversion-WebUI`](https://github.com/liujing04/Retrieval-based-Voice-Conversion-WebUI) reconstruction project
 
 </p>
