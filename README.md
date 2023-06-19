@@ -1,24 +1,10 @@
-<h1 align="center">RVC-WebUI(v3デモ用フォーク)</h1>
-<div align="center">
-<p>
 これはv3モデルの試作用リポジトリです。
 それ以外の用途の方はフォーク元に移動してください。
-[`liujing04/Retrieval-based-Voice-Conversion-WebUI`](https://github.com/liujing04/Retrieval-based-Voice-Conversion-WebUI) reconstruction project
 
-</p>
-</div>
+v3の学習済みの重みは以下で提供しています(VCTKで20エポックのみの事前学習のため品質は不十分です)
+https://huggingface.co/datasets/nadare/rvc-v3j
 
----
-
-<div align="center">
-<p>
-
-[日本語](README-ja.md) | [English](README.md)
-
-</p>
-</div>
-
-<br >
+vocos-versionは現在開発中です。しばらくお待ちください
 
 # Launch
 
