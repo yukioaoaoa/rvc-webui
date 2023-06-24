@@ -1,6 +1,6 @@
 
 # VoRAS (Vocos with Retrieval and self-Augmentation for Speechs)
-(This repository is currently in alpha. After completing the training of the pre-learning model, it will be a beta version.)
+(This repository is currently in alpha. After completing the training of the pre-training model, it will be a beta version.)
 
 Welcome to VoRAS. VoRAS is a model derived from RVC for fast and lightweight real-time voice change in Japanese.
 
