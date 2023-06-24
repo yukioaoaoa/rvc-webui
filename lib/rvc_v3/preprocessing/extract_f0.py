@@ -7,7 +7,7 @@ import numpy as np
 import pyworld
 from tqdm import tqdm
 
-from lib.rvc.utils import load_audio
+from lib.rvc_v3.utils import load_audio
 
 
 def compute_f0(

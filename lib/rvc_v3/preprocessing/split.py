@@ -9,7 +9,7 @@ import scipy.signal as signal
 from scipy.io import wavfile
 from tqdm import tqdm
 
-from lib.rvc.utils import load_audio
+from lib.rvc_v3.utils import load_audio
 
 from .slicer import Slicer
 

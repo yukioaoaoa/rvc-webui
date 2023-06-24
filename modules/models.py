@@ -7,8 +7,8 @@ from fairseq import checkpoint_utils
 from fairseq.models.hubert.hubert import HubertModel
 from pydub import AudioSegment
 
-from lib.rvc.models import SynthesizerTrnMs256NSFSid, SynthesizerTrnMs256NSFSidNono
-from lib.rvc.pipeline import VocalConvertPipeline
+from lib.voras.models import Synthesizer
+from lib.voras.pipeline import VocalConvertPipeline
 
 from .cmd_opts import opts
 from .shared import ROOT_DIR, device, is_half
@@ -22,8 +22,7 @@ EMBEDDINGS_LIST = {
         "rinna_hubert_base_jp.pt",
         "hubert-base-japanese",
         "local",
-    ),
-    "contentvec": ("checkpoint_best_legacy_500.pt", "contentvec", "local"),
+    )
 }
 
 
@@ -76,24 +75,16 @@ class VoiceConvertModel:
         if not "emb_channels" in state_dict["params"]:
             state_dict["params"]["emb_channels"] = 256  # for backward compat.
 
-        if f0 == 1:
-            self.net_g = SynthesizerTrnMs256NSFSid(
-                **state_dict["params"], is_half=is_half
-            )
-        else:
-            self.net_g = SynthesizerTrnMs256NSFSidNono(**state_dict["params"])
 
-        del self.net_g.enc_q
+        self.net_g = Synthesizer(**state_dict["params"])
+
+        # del self.net_g.enc_q
 
         self.net_g.load_state_dict(state_dict["weight"], strict=False)
-        self.net_g.eval().to(device)
-
-        if is_half:
-            self.net_g = self.net_g.half()
-        else:
-            self.net_g = self.net_g.float()
-
-        self.vc = VocalConvertPipeline(self.tgt_sr, device, is_half)
+        self.net_g.eval()
+        self.net_g.remove_weight_norm()
+        self.net_g.to(device)
+        self.vc = VocalConvertPipeline(self.tgt_sr, device, False)
         self.n_spk = state_dict["params"]["spk_embed_dim"]
 
     def single(

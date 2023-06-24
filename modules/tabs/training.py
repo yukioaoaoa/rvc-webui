@@ -5,11 +5,9 @@ from multiprocessing import cpu_count
 
 import gradio as gr
 
-from lib.rvc.preprocessing import extract_f0, extract_feature, split
-from lib.rvc.train import (create_dataset_meta, glob_dataset, train_index,
-                           train_model)
-from lib.rvc_v3.train import train_model as train_model_v3
-from lib.rvc_vocos.train import train_model as train_model_vocos
+from lib.voras.preprocessing import extract_f0, extract_feature, split
+from lib.voras.train import (create_dataset_meta, glob_dataset, train_index,
+                             train_model)
 from modules import models, utils
 from modules.shared import MODELS_DIR, device, half_support
 from modules.ui import Tab
@@ -246,75 +244,28 @@ class Training(Tab):
                 augment_path = None
                 speaker_info_path = None
 
-            if version in ["v1", "v2"]:
-                train_model(
-                    gpu_ids,
-                    config,
-                    training_dir,
-                    model_name,
-                    out_dir,
-                    sampling_rate_str,
-                    f0,
-                    batch_size,
-                    augment,
-                    augment_path,
-                    speaker_info_path,
-                    cache_batch,
-                    num_epochs,
-                    save_every_epoch,
-                    pre_trained_bottom_model_g,
-                    pre_trained_bottom_model_d,
-                    embedder_name,
-                    int(embedding_output_layer),
-                    False,
-                    None if len(gpu_ids) > 1 else device,
-                )
-            elif version == "v3":
-                train_model_v3(
-                    gpu_ids,
-                    config,
-                    training_dir,
-                    model_name,
-                    out_dir,
-                    sampling_rate_str,
-                    f0,
-                    batch_size,
-                    augment,
-                    augment_path,
-                    speaker_info_path,
-                    cache_batch,
-                    num_epochs,
-                    save_every_epoch,
-                    pre_trained_bottom_model_g,
-                    pre_trained_bottom_model_d,
-                    embedder_name,
-                    int(embedding_output_layer),
-                    False,
-                    None if len(gpu_ids) > 1 else device,
-                )
-            elif version == "vocos":
-                train_model_vocos(
-                    gpu_ids,
-                    config,
-                    training_dir,
-                    model_name,
-                    out_dir,
-                    sampling_rate_str,
-                    f0,
-                    batch_size,
-                    augment,
-                    augment_path,
-                    speaker_info_path,
-                    cache_batch,
-                    num_epochs,
-                    save_every_epoch,
-                    pre_trained_bottom_model_g,
-                    pre_trained_bottom_model_d,
-                    embedder_name,
-                    int(embedding_output_layer),
-                    False,
-                    None if len(gpu_ids) > 1 else device,
-                )
+            train_model(
+                gpu_ids,
+                config,
+                training_dir,
+                model_name,
+                out_dir,
+                sampling_rate_str,
+                f0,
+                batch_size,
+                augment,
+                augment_path,
+                speaker_info_path,
+                cache_batch,
+                num_epochs,
+                save_every_epoch,
+                pre_trained_bottom_model_g,
+                pre_trained_bottom_model_d,
+                embedder_name,
+                int(embedding_output_layer),
+                False,
+                None if len(gpu_ids) > 1 else device,
+            )
             yield "Training index..."
             if run_train_index:
                 if not reduce_index_size:
@@ -355,33 +306,33 @@ class Training(Tab):
 
                     with gr.Row().style(equal_height=False):
                         version = gr.Radio(
-                            choices=["v3", "vocos"],
-                            value="v2",
+                            choices=["voras"],
+                            value="voras",
                             label="Model version",
                         )
                         target_sr = gr.Radio(
-                            choices=["24k", "32k", "40k", "48k"],
-                            value="40k",
+                            choices=["24k"],
+                            value="24k",
                             label="Target sampling rate",
                         )
                         f0 = gr.Radio(
-                            choices=["Yes", "No"],
+                            choices=["Yes"],
                             value="Yes",
                             label="f0 Model",
                         )
                     with gr.Row().style(equal_height=False):
                         embedding_name = gr.Radio(
                             choices=list(models.EMBEDDINGS_LIST.keys()),
-                            value="contentvec",
+                            value="hubert-base-japanese",
                             label="Using phone embedder",
                         )
                         embedding_channels = gr.Radio(
-                            choices=["256", "768"],
+                            choices=["768"],
                             value="768",
                             label="Embedding channels",
                         )
                         embedding_output_layer = gr.Radio(
-                            choices=["9", "12"],
+                            choices=["12"],
                             value="12",
                             label="Embedding output layer",
                         )
@@ -420,32 +371,36 @@ class Training(Tab):
                             step=1,
                             label="Save every epoch",
                         )
-                        cache_batch = gr.Checkbox(label="Cache batch", value=True)
+                        cache_batch = gr.Checkbox(label="Cache batch", value=False)
                         fp16 = gr.Checkbox(
-                            label="FP16", value=half_support, disabled=not half_support
+                            label="BFP16", value=half_support, disabled=not half_support
                         )
                     with gr.Row().style(equal_height=False):
-                        augment = gr.Checkbox(label="Augment", value=False)
-                        augment_from_pretrain = gr.Checkbox(label="Augment From Pretrain", value=False)
+                        augment = gr.Checkbox(label="Augment", value=True)
+                        augment_from_pretrain = gr.Checkbox(label="Augment From Pretrain", value=True)
                         augment_path = gr.Textbox(
                             label="Pre trained generator path (pth)",
-                            value="file is not prepared"
+                            value=os.path.join(
+                                MODELS_DIR, "pretrained", "beta", "voras_pretrained_augmenter.pt"
+                            ),
                         )
                         speaker_info_path = gr.Textbox(
                             label="speaker info path (npy)",
-                            value="file is not prepared"
+                            value=os.path.join(
+                                MODELS_DIR, "pretrained", "beta", "voras_pretrained_augmenter_speaker_info.npy"
+                            ),
                         )
                     with gr.Row().style(equal_height=False):
                         pre_trained_generator = gr.Textbox(
                             label="Pre trained generator path",
                             value=os.path.join(
-                                MODELS_DIR, "pretrained", "v2", "f0G40k.pth"
+                                MODELS_DIR, "pretrained", "beta", "f0G24k.pth"
                             ),
                         )
                         pre_trained_discriminator = gr.Textbox(
                             label="Pre trained discriminator path",
                             value=os.path.join(
-                                MODELS_DIR, "pretrained", "v2", "f0D40k.pth"
+                                MODELS_DIR, "pretrained", "beta", "f0D24k.pth"
                             ),
                         )
                     with gr.Row().style(equal_height=False):
@@ -456,7 +411,7 @@ class Training(Tab):
                         )
                         reduce_index_size = gr.Radio(
                             choices=["Yes", "No"],
-                            value="No",
+                            value="Yes",
                             label="Reduce index size with kmeans",
                         )
                         maximum_index_size = gr.Number(

@@ -42,7 +42,7 @@ class TrainConfigModel(BaseModel):
 
 
 class TrainConfig(BaseModel):
-    version: Literal["vocos"] = "vocos"
+    version: Literal["voras"] = "voras"
     train: TrainConfigTrain
     data: TrainConfigData
     model: TrainConfigModel

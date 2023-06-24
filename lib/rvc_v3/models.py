@@ -14,10 +14,6 @@ from .commons import get_padding, init_weights
 from .modules import (CausalConvTranspose1d, ConvNext2d, DilatedCausalConv1d,
                       LoRALinear1d, ResBlock1, WaveConv1D)
 
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(parent_dir)
-import rvc.models as models_v1
-
 
 class TextEncoder(nn.Module):
     def __init__(

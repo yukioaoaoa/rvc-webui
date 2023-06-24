@@ -32,45 +32,38 @@ def calc_sha256(filepath: str):
 
 def download_models():
     def hash_check(url: str, out: str):
-        if not os.path.exists(out):
-            return False
-        etag = get_hf_etag(url)
-        hash = calc_sha256(out)
-        return etag == hash
+        return os.path.exists(out)
+        # etag = get_hf_etag(url)
+        # hash = calc_sha256(out)
+        # return etag == hash
 
-    os.makedirs(os.path.join(MODELS_DIR, "pretrained", "v2"), exist_ok=True)
+    os.makedirs(os.path.join(MODELS_DIR, "pretrained", "beta"), exist_ok=True)
 
     tasks = []
     for template in [
-        "D{}k",
-        "G{}k",
         "f0D{}k",
         "f0G{}k",
     ]:
-        basename = template.format("40")
-        url = f"https://huggingface.co/ddPn08/rvc-webui-models/resolve/main/pretrained/v2/{basename}.pth"
-        out = os.path.join(MODELS_DIR, "pretrained", "v2", f"{basename}.pth")
+        basename = template.format("24")
+        url = f"https://huggingface.co/datasets/nadare/voras/resolve/main/pretrained/beta/{basename}.pth"
+        out = os.path.join(MODELS_DIR, "pretrained", "beta", f"{basename}.pth")
 
         if hash_check(url, out):
             continue
 
         tasks.append((url, out))
 
+
     for filename in [
-        "checkpoint_best_legacy_500.pt",
+        "voras_pretrained_augmenter.pt", "voras_pretrained_augmenter_speaker_info.npy"
     ]:
-        out = os.path.join(MODELS_DIR, "embeddings", filename)
-        url = f"https://huggingface.co/ddPn08/rvc-webui-models/resolve/main/embeddings/{filename}"
+        out = os.path.join(MODELS_DIR, "pretrained", "beta", filename)
+        url = f"https://huggingface.co/datasets/nadare/voras/resolve/main/pretrained/beta/{filename}"
 
         if hash_check(url, out):
             continue
 
-        tasks.append(
-            (
-                f"https://huggingface.co/ddPn08/rvc-webui-models/resolve/main/embeddings/{filename}",
-                out,
-            )
-        )
+        tasks.append((url,out))
 
     # japanese-hubert-base (Fairseq)
     # from official repo
@@ -119,34 +112,8 @@ def install_ffmpeg():
 
 
 def update_modelnames():
-    for sr in ["32k", "40k", "48k"]:
-        files = [
-            f"f0G{sr}",
-            f"f0D{sr}",
-            f"G{sr}",
-            f"D{sr}",
-        ]
-        for file in files:
-            filepath = os.path.join(MODELS_DIR, "pretrained", f"{file}.pth")
-            if os.path.exists(filepath):
-                os.rename(
-                    filepath,
-                    os.path.join(MODELS_DIR, "pretrained", f"{file}256.pth"),
-                )
-
     if not os.path.exists(os.path.join(MODELS_DIR, "embeddings")):
         os.makedirs(os.path.join(MODELS_DIR, "embeddings"))
-
-    if os.path.exists(os.path.join(MODELS_DIR, "hubert_base.pt")):
-        os.rename(
-            os.path.join(MODELS_DIR, "hubert_base.pt"),
-            os.path.join(MODELS_DIR, "embeddings", "hubert_base.pt"),
-        )
-    if os.path.exists(os.path.join(MODELS_DIR, "checkpoint_best_legacy_500.pt")):
-        os.rename(
-            os.path.join(MODELS_DIR, "checkpoint_best_legacy_500.pt"),
-            os.path.join(MODELS_DIR, "embeddings", "checkpoint_best_legacy_500.pt"),
-        )
 
 
 def preload():

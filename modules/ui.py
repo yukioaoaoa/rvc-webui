@@ -145,8 +145,8 @@ def create_model_list_ui(speaker_id: bool = True, load: bool = True):
 
     def reload_model(raw=False):
         model_list = models.get_models()
-        if len(model_list) > 0:
-            models.load_model(model_list[0])
+        #f len(model_list) > 0:
+        #    models.load_model(model_list[0])
 
         if models.vc_model is not None:
             speaker_id_info["visible"] = True
@@ -175,7 +175,7 @@ def create_model_list_ui(speaker_id: bool = True, load: bool = True):
         model = gr.Dropdown(
             choices=model_list,
             label="Model",
-            value=model_list[0] if len(model_list) > 0 else None,
+            value=None,
         )
         speaker_id = gr.Slider(
             minimum=0,
