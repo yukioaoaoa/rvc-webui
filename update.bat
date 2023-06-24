@@ -5,7 +5,7 @@ if exist ".git" (
     git reset --hard origin/main
 ) else (
     git init
-    git remote add origin https://github.com/ddPn08/rvc-webui.git
+    git remote add origin https://github.com/nadare881/voras-webui-beta.git
     git fetch --prune
     git reset --hard origin/main
 )
