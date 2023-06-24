@@ -32,10 +32,11 @@ def calc_sha256(filepath: str):
 
 def download_models():
     def hash_check(url: str, out: str):
-        return os.path.exists(out)
-        # etag = get_hf_etag(url)
-        # hash = calc_sha256(out)
-        # return etag == hash
+        if not os.path.exists(out):
+            return False
+        etag = get_hf_etag(url)
+        hash = calc_sha256(out)
+        return etag == hash
 
     os.makedirs(os.path.join(MODELS_DIR, "pretrained", "beta"), exist_ok=True)
 
