@@ -21,8 +21,11 @@ class MelLoss(nn.Module):
             hop_length=hop_length,
             f_min=f_min,
             f_max=f_max,
+            window_fn=torch.hann_window,
             center=True,
-            power=1
+            power=1,
+            norm="slaney",
+            mel_scale="slaney"
         )
 
     def forward(self, x_true, x_pred):

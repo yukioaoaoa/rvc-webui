@@ -11,7 +11,8 @@ from torch.nn.utils import remove_weight_norm, spectral_norm, weight_norm
 
 from . import commons, modules
 from .commons import get_padding
-from .modules import ConvNext2d, ISTFTHead, LoRALinear1d, WaveBlock
+from .modules import (ConvNext2d, HarmonicEmbedder, IMDCTSymExpHead,
+                      LoRALinear1d, SnakeFilter, WaveBlock)
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(parent_dir)
@@ -23,45 +24,62 @@ sr2sr = {
     "48k": 48000,
 }
 
-class GeneratorVocos(torch.nn.Module):
+class GeneratorVoras(torch.nn.Module):
     def __init__(
         self,
         emb_channels,
         inter_channels,
         gin_channels,
         n_layers,
-        n_fft,
+        sr,
         hop_length,
     ):
-        super(GeneratorVocos, self).__init__()
+        super(GeneratorVoras, self).__init__()
         self.n_layers = n_layers
-        self.emb_pitch = nn.Embedding(256, gin_channels)  # pitch 256
-        self.plinear = LoRALinear1d(gin_channels, inter_channels, gin_channels, r=8)
+        self.emb_pitch = HarmonicEmbedder(768, inter_channels, gin_channels, 16, 15)  #   # pitch 256
+        self.plinear = LoRALinear1d(inter_channels, inter_channels, gin_channels, r=8)
         self.glinear = weight_norm(nn.Conv1d(gin_channels, inter_channels, 1))
         self.resblocks = nn.ModuleList()
-        self.init_linear = LoRALinear1d(emb_channels, inter_channels, gin_channels, r=2)
+        self.init_linear = LoRALinear1d(emb_channels, inter_channels, gin_channels, r=4)
         for _ in range(self.n_layers):
-            self.resblocks.append(WaveBlock(inter_channels, gin_channels, [11] * 3, [1] * 3, [1, 2, 4], 2, r=2))
-        self.head = ISTFTHead(inter_channels, gin_channels, n_fft=n_fft, hop_length=hop_length)
+            self.resblocks.append(WaveBlock(inter_channels, gin_channels, [9] * 2, [1] * 2, [1, 9], 2, r=4))
+        self.head = IMDCTSymExpHead(inter_channels, gin_channels, hop_length, padding="center", sample_rate=sr)
+        self.post = SnakeFilter(4, 8, 9, 2, eps=1e-5)
 
-    def forward(self, x, pitch, x_mask, g):
-        x = self.init_linear(x, g)
-        p = torch.transpose(self.emb_pitch(pitch), 1, -1)
-        x = x + self.plinear(p, g) + self.glinear(g)
+    def forward(self, x, pitchf, x_mask, g):
+        x = self.init_linear(x, g) + self.plinear(self.emb_pitch(pitchf, g), g) + self.glinear(g)
         for i in range(self.n_layers):
             x = self.resblocks[i](x, x_mask, g)
+        x = x * x_mask
         x = self.head(x, g)
-        return x
+        x = self.post(x)
+        return torch.tanh(x)
 
     def remove_weight_norm(self):
+        self.plinear.remove_weight_norm()
+        remove_weight_norm(self.glinear)
         for l in self.resblocks:
             l.remove_weight_norm()
-        remove_weight_norm(self.glinear)
         self.init_linear.remove_weight_norm()
-        self.plinear.remove_weight_norm()
+        self.head.remove_weight_norm()
+        self.post.remove_weight_norm()
+
+    def fix_speaker(self, g):
+        self.plinear.fix_speaker(g)
+        self.init_linear.fix_speaker(g)
+        for l in self.resblocks:
+            l.fix_speaker(g)
+        self.head.fix_speaker(g)
+
+    def unfix_speaker(self, g):
+        self.plinear.unfix_speaker(g)
+        self.init_linear.unfix_speaker(g)
+        for l in self.resblocks:
+            l.unfix_speaker(g)
+        self.head.unfix_speaker(g)
 
 
-class SynthesizerTrnMs256NSFSid(nn.Module):
+class Synthesizer(nn.Module):
     def __init__(
         self,
         segment_size,
@@ -88,12 +106,12 @@ class SynthesizerTrnMs256NSFSid(nn.Module):
         self.emb_channels = emb_channels
         self.sr = sr
 
-        self.dec = GeneratorVocos(
+        self.dec = GeneratorVoras(
             emb_channels,
             inter_channels,
             gin_channels,
             n_layers,
-            n_fft,
+            sr,
             hop_length
         )
 
@@ -106,9 +124,18 @@ class SynthesizerTrnMs256NSFSid(nn.Module):
             "emb_channels:",
             emb_channels,
         )
+        self.speaker = None
 
     def remove_weight_norm(self):
         self.dec.remove_weight_norm()
+
+    def change_speaker(self, sid: int):
+        if self.speaker is not None:
+            g = self.emb_g(torch.from_numpy(np.array(self.speaker))).unsqueeze(-1)
+            self.dec.unfix_speaker(g)
+        g = self.emb_g(torch.from_numpy(np.array(sid))).unsqueeze(-1)
+        self.dec.fix_speaker(g)
+        self.speaker = sid
 
     def forward(
         self, phone, phone_lengths, pitch, pitchf, ds
@@ -119,16 +146,16 @@ class SynthesizerTrnMs256NSFSid(nn.Module):
         x_slice, ids_slice = commons.rand_slice_segments(
             x, phone_lengths, self.segment_size
         )
-        pitch_slice = commons.slice_segments2(pitch, ids_slice, self.segment_size)
+        pitchf_slice = commons.slice_segments2(pitchf, ids_slice, self.segment_size)
         mask_slice = commons.slice_segments(x_mask, ids_slice, self.segment_size)
-        o = self.dec(x_slice, pitch_slice, mask_slice, g)
+        o = self.dec(x_slice, pitchf_slice, mask_slice, g)
         return o, ids_slice, x_mask, g
 
     def infer(self, phone, phone_lengths, pitch, nsff0, sid, max_len=None):
         g = self.emb_g(sid).unsqueeze(-1)
         x = torch.transpose(phone, 1, -1)
         x_mask = torch.unsqueeze(commons.sequence_mask(phone_lengths, x.size(2)), 1).to(phone.dtype)
-        o = self.dec((x * x_mask)[:, :, :max_len], pitch, x_mask, g)
+        o = self.dec((x * x_mask)[:, :, :max_len], nsff0, x_mask, g)
         return o, x_mask, (None, None, None, None)
 
 
@@ -151,7 +178,7 @@ class DiscriminatorP(torch.nn.Module):
                     (u*3, 1),
                     (u, 1),
                     4,
-                    r=2
+                    r=2 + i//2
                 )
             )
         self.conv_post = weight_norm(Conv2d(final_dim, 1, (3, 1), (1, 1)))

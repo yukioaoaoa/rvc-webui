@@ -9,6 +9,7 @@ import soundfile as sf
 import torch
 import torch.nn.functional as F
 from fairseq import checkpoint_utils
+from torch.cuda.amp import autocast
 from tqdm import tqdm
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -36,10 +37,6 @@ def load_embedder(embedder_path: str, device):
         )
         embedder_model = models[0]
         embedder_model = embedder_model.to(device)
-        if device != "cpu":
-            embedder_model = embedder_model.half()
-        else:
-            embedder_model = embedder_model.float()
         embedder_model.eval()
     except Exception as e:
         print(f"Error: {e} {embedder_path}")
@@ -100,46 +97,32 @@ def processor(
                 padding_mask = torch.BoolTensor(feats.shape).fill_(False)
                 if isinstance(model, tuple):
                     feats = model[0](
-                        feats.squeeze(0).squeeze(0).to(device),
+                        feats.squeeze(0).squeeze(0).to(device).float(),
                         return_tensors="pt",
                         sampling_rate=16000,
                     )
-                    if half_support:
-                        feats = feats.input_values.to(device).half()
-                    else:
-                        feats = feats.input_values.to(device).float()
 
                     with torch.no_grad():
-                        if half_support:
+                        with autocast(half_support):
                             if is_feats_dim_768:
                                 feats = model[1](feats).last_hidden_state
                             else:
                                 feats = model[1](feats).extract_features
-                        else:
-                            if is_feats_dim_768:
-                                feats = model[1].float()(feats).last_hidden_state
-                            else:
-                                feats = model[1].float()(feats).extract_features
                 else:
                     inputs = {
-                        "source": feats.half().to(device)
-                        if half_support
-                        else feats.to(device),
+                        "source": feats.float().to(device),
                         "padding_mask": padding_mask.to(device),
                         "output_layer": embedding_output_layer,
                     }
 
-                    # なんかまだこの時点でfloat16なので改めて変換
-                    if not half_support:
-                        model = model.float()
-                        inputs["source"] = inputs["source"].float()
 
-                    with torch.no_grad():
-                        logits = model.extract_features(**inputs)
-                        if is_feats_dim_768:
-                            feats = logits[0]
-                        else:
-                            feats = model.final_proj(logits[0])
+                    with autocast(half_support):
+                        with torch.no_grad():
+                            logits = model.extract_features(**inputs)
+                            if is_feats_dim_768:
+                                feats = logits[0]
+                            else:
+                                feats = model.final_proj(logits[0])
 
                 feats = feats.squeeze(0).float().cpu().numpy()
                 if np.isnan(feats).sum() == 0:

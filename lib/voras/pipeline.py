@@ -8,11 +8,11 @@ import pyworld
 import scipy.signal as signal
 import torch
 import torch.nn.functional as F
-
 # from faiss.swigfaiss_avx2 import IndexIVFFlat # cause crash on windows' faiss-cpu installed from pip
 from fairseq.models.hubert import HubertModel
+from torch.cuda.amp import autocast
 
-from .models import SynthesizerTrnMs256NSFSid
+from .models import Synthesizer
 
 
 class VocalConvertPipeline(object):
@@ -113,7 +113,7 @@ class VocalConvertPipeline(object):
         self,
         model: HubertModel,
         embedding_output_layer: int,
-        net_g: SynthesizerTrnMs256NSFSid,
+        net_g: Synthesizer,
         sid: int,
         audio: np.ndarray,
         pitch: np.ndarray,
@@ -123,10 +123,6 @@ class VocalConvertPipeline(object):
         index_rate: float,
     ):
         feats = torch.from_numpy(audio)
-        if self.is_half:
-            feats = feats.half()
-        else:
-            feats = feats.float()
         if feats.dim() == 2:  # double channels
             feats = feats.mean(-1)
         assert feats.dim() == 1, feats.dim()
@@ -145,15 +141,12 @@ class VocalConvertPipeline(object):
                 return_tensors="pt",
                 sampling_rate=16000,
             )
-            if self.is_half:
-                feats = feats.input_values.to(self.device).half()
-            else:
-                feats = feats.input_values.to(self.device)
             with torch.no_grad():
-                if is_feats_dim_768:
-                    feats = model[1](feats).last_hidden_state
-                else:
-                    feats = model[1](feats).extract_features
+                with autocast(half_support):
+                    if is_feats_dim_768:
+                        feats = model[1](feats).last_hidden_state
+                    else:
+                        feats = model[1](feats).extract_features
         else:
             inputs = {
                 "source": feats.half().to(self.device)
@@ -163,16 +156,16 @@ class VocalConvertPipeline(object):
                 "output_layer": embedding_output_layer,
             }
 
-            if not half_support:
-                model = model.float()
-                inputs["source"] = inputs["source"].float()
+            model = model.float()
+            inputs["source"] = inputs["source"].float()
 
             with torch.no_grad():
-                logits = model.extract_features(**inputs)
-                if is_feats_dim_768:
-                    feats = logits[0]
-                else:
-                    feats = model.final_proj(logits[0])
+                with autocast(half_support):
+                    logits = model.extract_features(**inputs)
+                    if is_feats_dim_768:
+                        feats = logits[0]
+                    else:
+                        feats = model.final_proj(logits[0])
 
         if (
             isinstance(index, type(None)) == False
@@ -183,13 +176,9 @@ class VocalConvertPipeline(object):
             if self.is_half:
                 npy = npy.astype("float32")
 
-            score, ix = index.search(npy, k=8)
-            weight = np.square(1 / score)
-            weight /= weight.sum(axis=1, keepdims=True)
-            npy = np.sum(big_npy[ix] * np.expand_dims(weight, axis=2), axis=1)
+            score, ix = index.search(npy, k=1)
+            npy = big_npy[ix][:, 0]
 
-            if self.is_half:
-                npy = npy.astype("float16")
             feats = (
                 torch.from_numpy(npy).unsqueeze(0).to(self.device) * index_rate
                 + (1 - index_rate) * feats
@@ -205,23 +194,24 @@ class VocalConvertPipeline(object):
                 pitchf = pitchf[:, :p_len]
         p_len = torch.tensor([p_len], device=self.device).long()
         with torch.no_grad():
-            if pitch != None and pitchf != None:
-                audio1 = (
-                    (net_g.infer(feats, p_len, pitch, pitchf, sid)[0][0, 0] * 32768)
-                    .data.cpu()
-                    .float()
-                    .numpy()
-                    .astype(np.int16)
-                )
-            else:
-                audio1 = (
-                    (net_g.infer(feats, p_len, sid)[0][0, 0] * 32768)
-                    .data.cpu()
-                    .float()
-                    .numpy()
-                    .astype(np.int16)
-                )
-        del feats, p_len, padding_mask
+            with autocast(half_support):
+                if pitch != None and pitchf != None:
+                    audio1 = (
+                        (net_g.infer(feats, p_len, pitch, pitchf, sid)[0][0, 0] * 32768)
+                        .data.cpu()
+                        .float()
+                        .numpy()
+                        .astype(np.int16)
+                    )
+                else:
+                    audio1 = (
+                        (net_g.infer(feats, p_len, sid)[0][0, 0] * 32768)
+                        .data.cpu()
+                        .float()
+                        .numpy()
+                        .astype(np.int16)
+                    )
+            del feats, p_len, padding_mask
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return audio1
@@ -230,7 +220,7 @@ class VocalConvertPipeline(object):
         self,
         model: HubertModel,
         embedding_output_layer: int,
-        net_g: SynthesizerTrnMs256NSFSid,
+        net_g: Synthesizer,
         sid: int,
         audio: np.ndarray,
         transpose: int,

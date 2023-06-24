@@ -30,14 +30,10 @@ from .data_utils import (DistributedBucketSampler, TextAudioCollate,
                          TextAudioLoaderMultiNSFsid)
 from .losses import MelLoss, discriminator_loss, feature_loss, generator_loss
 from .mel_processing import mel_spectrogram_torch, spec_to_mel_torch
-from .models import MultiPeriodDiscriminator, SynthesizerTrnMs256NSFSid
+from .models import MultiPeriodDiscriminator, Synthesizer
 from .preprocessing.extract_feature import (MODELS_DIR, get_embedder,
                                             load_embedder)
 from .utils import AWP
-
-#parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-#sys.path.append(parent_dir)
-#from rvc.models import SynthesizerTrnMs256NSFSid
 
 
 def is_audio_file(file: str):
@@ -455,7 +451,7 @@ def training_runner(
         prefetch_factor=2,
     )
 
-    net_g = SynthesizerTrnMs256NSFSid(
+    net_g = Synthesizer(
         config.train.segment_size // config.data.hop_length,
         config.data.filter_length,
         config.data.hop_length,
@@ -469,7 +465,7 @@ def training_runner(
     else:
         net_g = net_g.to(device=device)
 
-    if config.version == "vocos":
+    if config.version == "voras":
         periods = [1, 2, 3, 5, 7, 11, 17, 23, 37]
     else:
         raise
@@ -518,13 +514,14 @@ def training_runner(
 
         if (augment_path is not None):
             state_dict = torch.load(augment_path, map_location="cpu")
-            augment_net_g = SynthesizerTrnMs256NSFSid(
+            augment_net_g = Synthesizer(
                 **state_dict["params"], is_half=False
             )
             augment_speaker_info = np.load(speaker_info_path)
 
             augment_net_g.load_state_dict(state_dict["weight"], strict=False)
             augment_net_g.eval().to(device)
+            augment_net_g.remove_weight_norm()
 
         else:
             augment_net_g = net_g
@@ -548,6 +545,7 @@ def training_runner(
                 net_g.load_state_dict(net_g_state)
 
             del net_g_state
+            torch.nn.init.normal_(net_g.emb_g.weight)
 
             if is_multi_process:
                 net_d.module.load_state_dict(
@@ -580,8 +578,8 @@ def training_runner(
 
     mel_loss = MelLoss(
         sample_rate=int(sample_rate[:-1] + "000"),
-        n_fft=config.data.filter_length,
-        win_length=config.data.win_length,
+        n_fft=2048,
+        win_length=2048,
         hop_length=config.data.hop_length,
         f_min=config.data.mel_fmin,
         f_max=config.data.mel_fmax
@@ -690,10 +688,10 @@ def training_runner(
                 awp.perturb()
 
             with autocast(enabled=config.train.fp16_run, dtype=torch.bfloat16):
-                if augment:
+                if augment and step > 5 * len(train_loader):
                     with torch.no_grad():
                         new_phone, new_wave = change_speaker(augment_net_g, augment_speaker_info, embedder, embedding_output_layer, phone, phone_lengths, pitch, pitchf, spec_lengths)
-                        weight = (1 - np.power(.9, step / len(train_loader))) * torch.rand(phone.shape[0], 1, 1).to(phone.device, phone.dtype) # 学習の初期はそのままのphone embeddingを使う
+                        weight = ((1 - np.power(.8, (step - 5 * len(train_loader)))) * torch.rand(phone.shape[0], 1, 1)).to(phone.device, phone.dtype) # 学習の初期はそのままのphone embeddingを使う
                         phone = phone * (1. - weight) + new_phone * weight
 
                 (
@@ -770,14 +768,14 @@ def training_runner(
                     use_cache=use_cache,
                 )
                 if global_step % config.train.log_interval == 0:
-                    if augment:
+                    if augment and step > 5 * len(train_loader):
                         new_wave = commons.slice_segments(
                             new_wave, ids_slice * config.data.hop_length, config.train.segment_size
                         )
                     for i in range(4):
                         torchaudio.save(filepath=os.path.join(training_dir, "logs", f"y_true_{i:02}.wav"), src=wave[i].detach().cpu().float(), sample_rate=int(sample_rate[:-1] + "000"))
                         torchaudio.save(filepath=os.path.join(training_dir, "logs", f"y_pred_{i:02}.wav"), src=y_hat[i].detach().cpu().float(), sample_rate=int(sample_rate[:-1] + "000"))
-                        if augment:
+                        if augment and step > 5 * len(train_loader):
                             torchaudio.save(filepath=os.path.join(training_dir, "logs", f"y_aug_{i:02}.wav"), src=new_wave[i].detach().cpu().float(), sample_rate=int(sample_rate[:-1] + "000"))
                     with torch.no_grad():
                         mel = spec_to_mel_torch(

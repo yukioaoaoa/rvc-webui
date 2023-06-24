@@ -27,13 +27,13 @@ def inference_options_ui(show_out_dir=True):
                 label="Pitch Extraction Algorithm",
             )
             embedding_model = gr.Radio(
-                choices=["auto", *models.EMBEDDINGS_LIST.keys()],
+                choices=[*models.EMBEDDINGS_LIST.keys()],
                 value="auto",
                 label="Embedder Model",
             )
             embedding_output_layer = gr.Radio(
-                choices=["auto", "9", "12"],
-                value="auto",
+                choices=["12"],
+                value="12",
                 label="Embedder Output Layer",
             )
         with gr.Column():

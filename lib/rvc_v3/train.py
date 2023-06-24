@@ -35,10 +35,6 @@ from .preprocessing.extract_feature import (MODELS_DIR, get_embedder,
                                             load_embedder)
 from .utils import AWP
 
-#parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-#sys.path.append(parent_dir)
-#from rvc.models import SynthesizerTrnMs256NSFSid
-
 
 def is_audio_file(file: str):
     if "." not in file:

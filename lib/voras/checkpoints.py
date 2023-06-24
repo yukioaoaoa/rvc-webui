@@ -14,7 +14,7 @@ def write_config(state_dict: Dict[str, Any], cfg: Dict[str, Any]):
 
 def create_trained_model(
     weights: Dict[str, Any],
-    version: Literal["vocos"],
+    version: Literal["voras"],
     sr: str,
     f0: bool,
     emb_name: str,
@@ -28,7 +28,6 @@ def create_trained_model(
         if "enc_q" in key:
             continue
         state_dict["weight"][key] = weights[key].half()
-    assert version == "vocos"
     write_config(
         state_dict,
         {
@@ -50,7 +49,7 @@ def create_trained_model(
             "sr": 24000,
         },
     )
-    state_dict["version"] = version
+    state_dict["version"] = "voras_beta"
     state_dict["info"] = f"{epoch}epoch"
     state_dict["sr"] = sr
     state_dict["f0"] = 1 if f0 else 0
@@ -61,7 +60,7 @@ def create_trained_model(
 
 def save(
     model,
-    version: Literal["vocos"],
+    version: Literal["voras"],
     sr: str,
     f0: bool,
     emb_name: str,
